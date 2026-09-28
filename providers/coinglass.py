@@ -27,9 +27,10 @@ class CoinGlassClient(KeyedProvider):
         self.blocked = None
 
     def _get(self, path: str, params: dict) -> Any:
-        _limiter.wait()
-        payload = self.guard(lambda: http_get_json(f"{BASE}{path}", params=params,
-                                                   headers={"CG-API-KEY": self.api_key}, retries=1))
+        def call():
+            _limiter.wait()
+            return http_get_json(f"{BASE}{path}", params=params, headers={"CG-API-KEY": self.api_key}, retries=1)
+        payload = self.guard(call)
         if str(payload.get("code")) != "0":
             raise ProviderError(f"coinglass {path}: {payload.get('msg')}")
         return payload.get("data")

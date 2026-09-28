@@ -18,6 +18,10 @@ RETRY_STATUS = {429, 500, 502, 503, 504}
 class ProviderError(RuntimeError):
     """A provider could not deliver data. Callers treat the layer as unavailable."""
 
+    def __init__(self, message: str, body: Any = None):
+        super().__init__(message)
+        self.body = body  # parsed error payload, when the API sent one
+
 
 def http_get_json(url: str, *, params: dict | None = None, headers: dict | None = None,
                   timeout: float = TIMEOUT, retries: int = 2, backoff: float = 1.5) -> Any:
@@ -32,7 +36,11 @@ def http_get_json(url: str, *, params: dict | None = None, headers: dict | None 
             return r.json()
         except requests.HTTPError as exc:
             # 4xx other than 429 will not get better with a retry.
-            raise ProviderError(f"{url} -> HTTP {exc.response.status_code}") from exc
+            try:
+                body = exc.response.json()
+            except ValueError:
+                body = None
+            raise ProviderError(f"{url} -> HTTP {exc.response.status_code}", body=body) from exc
         except (requests.ConnectionError, requests.Timeout, ValueError) as exc:
             last_exc = exc
             if attempt < retries:
@@ -117,6 +125,9 @@ class KeyedProvider:
         return bool(self.api_key) and not self.blocked
 
     def guard(self, fn: Callable[[], Any]) -> Any:
+        if self.blocked:
+            # Calls already in flight in other threads stop here, without waiting on the rate limiter.
+            raise ProviderError(f"{self.name} desligado: {self.blocked}")
         try:
             return fn()
         except ProviderError as exc:

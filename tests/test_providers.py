@@ -330,3 +330,34 @@ def test_transient_errors_do_not_switch_the_provider_off():
         with pytest.raises(ProviderError):
             client.headlines(["BTC"])
     assert client.enabled is True
+
+
+def test_news_drops_an_unsupported_coin_and_retries_the_batch():
+    # Real case: NewsData answers HTTP 422 {"results": {"invalid_coin": "fluid"}} and rejects the whole batch.
+    client = NewsClient(api_key="k")
+    calls = []
+
+    def fake(url, params=None, headers=None, **kw):
+        calls.append(params["coin"])
+        bad = [c for c in params["coin"].split(",") if c in ("fluid", "hkd")]
+        if bad:  # the real API lists every unknown coin, comma-separated
+            raise ProviderError("x -> HTTP 422", body={"status": "error", "results": {"invalid_coin": ",".join(bad)}})
+        return {"results": [{"title": "BTC listing news", "coin": ["btc"]}]}
+
+    with mock.patch("providers.news.http_get_json", side_effect=fake):
+        out = client.headlines(["BTC", "FLUID", "HKD"])
+        assert out["BTC"][0]["title"] == "BTC listing news" and out["FLUID"] == [] and out["HKD"] == []
+        client.headlines(["FLUID", "HKD"])  # remembered as unsupported: no new request
+    assert calls == ["btc,fluid,hkd", "btc"]
+    assert client.enabled is True  # a 422 is not an access problem
+
+
+def test_blocked_provider_does_not_wait_on_the_rate_limiter():
+    client = LunarCrushClient(api_key="k")
+    client.blocked = "HTTP 402"
+    with mock.patch("providers.lunarcrush._limiter") as limiter, \
+         mock.patch("providers.lunarcrush.http_get_json") as get:
+        with pytest.raises(ProviderError):
+            client.coins()
+    limiter.wait.assert_not_called()
+    get.assert_not_called()

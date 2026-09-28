@@ -22,9 +22,11 @@ class LunarCrushClient(KeyedProvider):
         self.blocked = None
 
     def _get(self, path: str, params: dict | None = None) -> Any:
-        _limiter.wait()
-        payload = self.guard(lambda: http_get_json(f"{BASE}{path}", params=params,
-                                                   headers={"Authorization": f"Bearer {self.api_key}"}, retries=1))
+        def call():
+            _limiter.wait()
+            return http_get_json(f"{BASE}{path}", params=params,
+                                 headers={"Authorization": f"Bearer {self.api_key}"}, retries=1)
+        payload = self.guard(call)
         return payload.get("data") if isinstance(payload, dict) else payload
 
     def coins(self) -> list[dict[str, Any]]:

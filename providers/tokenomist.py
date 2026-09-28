@@ -24,8 +24,10 @@ class TokenomistClient(KeyedProvider):
         self.blocked = None
 
     def _get(self, path: str, params: dict | None = None) -> Any:
-        _limiter.wait()
-        payload = self.guard(lambda: http_get_json(f"{BASE}{path}", params=params, headers={"x-api-key": self.api_key}))
+        def call():
+            _limiter.wait()
+            return http_get_json(f"{BASE}{path}", params=params, headers={"x-api-key": self.api_key})
+        payload = self.guard(call)
         if not payload.get("status", True):
             raise ProviderError(f"tokenomist {path}: {payload.get('errorMessage')}")
         return payload.get("data")

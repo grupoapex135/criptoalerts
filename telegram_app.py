@@ -425,6 +425,10 @@ async def scanner_job(context: ContextTypes.DEFAULT_TYPE):
             await _notify_error(context, f"A varredura automática falhou:\n{exc}")
             return
         _record_scan(report, None)
+    log.info("[scanner] %d ativos (%d pré-Binance) · %d a fundo · %d na IA · %d alerta(s) · %d observação · "
+             "%d vetados · %d erros", report["universe"], report.get("universe_pre_listing", 0), report["deep"],
+             report["candidates"], len(report["results"]), len(report["watch"]), len(report["vetoed"]),
+             len(report["errors"]))
 
     await _deliver(context, report)
     if report["errors"]:
