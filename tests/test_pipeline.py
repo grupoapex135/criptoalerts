@@ -64,6 +64,7 @@ def mocked(request):
         p(radar.binance, "ticker", side_effect=lambda pair: tickers([pair])[pair])
         p(radar.futures, "derivatives", return_value=HEALTHY_DERIVATIVES)
         p(radar.futures, "perp_bases", return_value=set())
+        p(radar.cg, "category_ids", return_value=set())
         p(radar, "token_security", return_value=None)
         yield p(radar, "analyze", side_effect=lambda d: ai_for(radar.reference_price(d)))
 

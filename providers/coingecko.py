@@ -110,6 +110,19 @@ class CoinGeckoClient:
             "platforms": {k: v for k, v in (raw.get("platforms") or {}).items() if k and v},
         }
 
+    def category_ids(self, category_id: str, max_pages: int = 4) -> set[str]:
+        """Ids of every coin in a CoinGecko category (e.g. binance-alpha-spotlight), cached for hours."""
+        def fetch():
+            ids: set[str] = set()
+            for page in range(1, max_pages + 1):
+                batch = self._get("/coins/markets", {"vs_currency": "usd", "category": category_id,
+                                                     "per_page": 250, "page": page})
+                ids |= {c["id"] for c in batch if c.get("id")}
+                if len(batch) < 250:
+                    break
+            return ids
+        return cache.get_or_set(f"cg:category:{category_id}", CACHE_TTL["coingecko_category"], fetch)
+
     def price_series(self, coin_id: str, days: int) -> list[dict[str, float]]:
         """Price points since `days` ago (hourly up to 90 days), as candles with high=low=close."""
         raw = self._get(f"/coins/{coin_id}/market_chart", {"vs_currency": "usd", "days": max(1, days)})

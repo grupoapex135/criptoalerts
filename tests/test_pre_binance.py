@@ -121,6 +121,7 @@ def pre_mocked():
         p(radar.futures, "derivatives", return_value={"source": "binance_futures", "funding_rate_pct": 0.01,
                                                       "oi_change_24h": 2.0})
         p(radar.futures, "perp_bases", return_value={"FLUID"})
+        p(radar.cg, "category_ids", side_effect=lambda cat: {"alphacoin"} if cat == "binance-alpha-spotlight" else set())
         security = p(radar, "token_security", return_value={"severe": [], "warnings": [], "top10_holders_pct": 20.0})
         analyze = p(radar, "analyze", side_effect=lambda d: make_ai(
             entry_min_usd=radar.reference_price(d) * 0.98, entry_max_usd=radar.reference_price(d) * 1.01,
@@ -267,3 +268,31 @@ def test_pre_listing_without_fundamentals_or_binance_signal_skips_the_ai(pre_moc
     radar.evaluate_candidates()
     seen = {c.args[0]["asset"]["symbol"] for c in pre_mocked["analyze"].call_args_list}
     assert "FLUID" not in seen and "PENDLE" in seen
+
+
+def test_deep_slots_go_to_assets_that_can_pass_the_rule(pre_mocked):
+    # Real case: all 8 pre-listing deep slots went to coins with neither fundamentals nor a
+    # Binance signal (CBK, DKA, CASHCAT...), so FLUID/VELO-like candidates never got analyzed.
+    from analysis import params as P
+    noise = [make_coin(id=f"noise{i}", symbol=f"nz{i}", name=f"Noise {i}", current_price=1.0, market_cap=300e6,
+                       total_volume=60e6, fully_diluted_valuation=300e6) for i in range(3)]
+    alpha = make_coin(id="alphacoin", symbol="alfa", name="Alpha Coin", current_price=2.0, market_cap=120e6,
+                      total_volume=2e6, fully_diluted_valuation=130e6)   # weaker market score, but on Binance Alpha
+    radar.cg.markets.return_value = [BTC, ETH, *noise, alpha]
+    radar.futures.perp_bases.return_value = set()
+    radar.cg.coin_profile.side_effect = lambda cid: {"description": "x", "categories": [], "cex": ["Bybit"],
+                                                     "cex_ids": ["bybit_spot"], "dex": [], "platforms": {}}
+    with mock.patch.object(P, "TREND_CANDIDATES", 1), mock.patch.object(P, "DEEP_CANDIDATES", 1):
+        radar.evaluate_candidates()
+    deep_profiles = {c.args[0] for c in radar.cg.coin_profile.call_args_list}
+    assert "alphacoin" in deep_profiles
+    assert not any(cid.startswith("noise") for cid in deep_profiles)
+
+
+def test_venues_list_tier1_exchanges_first(pre_mocked):
+    # Real case: MOODENG showed "HTX, WhiteBIT, WEEX" although it trades on Coinbase, OKX and Upbit.
+    radar.cg.coin_profile.side_effect = lambda cid: {**FLUID_PROFILE, "cex": ["HTX", "WEEX", "Upbit", "Coinbase"],
+                                                     "cex_ids": ["huobi", "weex", "upbit", "gdax"]}
+    report = radar.evaluate_candidates()
+    fluid = next(r for r in report["results"] if r["dossier"]["asset"]["symbol"] == "FLUID")
+    assert fluid["dossier"]["venue"]["cex"] == ["Upbit", "Coinbase", "HTX"]

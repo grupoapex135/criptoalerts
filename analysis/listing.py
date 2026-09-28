@@ -8,16 +8,18 @@ from typing import Any
 from analysis.params import BINANCE_PROGRAM_CATEGORIES, MAJOR_CEX, TIER1_CEX
 
 
-def build_listing(profile: dict[str, Any] | None, has_binance_perp: bool) -> dict[str, Any]:
+def build_listing(profile: dict[str, Any] | None, has_binance_perp: bool,
+                  early_categories: set[str] | frozenset = frozenset()) -> dict[str, Any]:
     profile = profile or {}
-    categories = set(profile.get("categories") or [])
+    # Categories known from the bulk category lists (before the profile) count too.
+    categories = set(profile.get("categories") or []) | set(early_categories)
     kinds = {BINANCE_PROGRAM_CATEGORIES[c] for c in categories if c in BINANCE_PROGRAM_CATEGORIES}
     programs = sorted(c for c in categories if BINANCE_PROGRAM_CATEGORIES.get(c) == "binance_program")
     cex_ids = set(profile.get("cex_ids") or [])
     tier1 = sorted(MAJOR_CEX[i] for i in cex_ids & TIER1_CEX)
     cex, dex = profile.get("cex") or [], profile.get("dex") or []
     return {
-        "available": bool(profile) or has_binance_perp,
+        "available": bool(profile) or has_binance_perp or bool(early_categories),
         "binance_alpha": "binance_alpha" in kinds,
         "yzi_labs": "yzi_labs" in kinds,
         "binance_programs": programs,

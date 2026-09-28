@@ -151,7 +151,8 @@ class Candidate:
     """One asset moving through the funnel: provider context + the dossier the AI will read."""
 
     def __init__(self, coin: dict[str, Any], bulk: dict[str, Any], regime: dict[str, Any],
-                 mode: str = "binance", perps: set[str] | frozenset = frozenset()):
+                 mode: str = "binance", perps: set[str] | frozenset = frozenset(),
+                 binance_categories: dict[str, set[str]] | None = None):
         self.coin = coin
         self.mode = mode
         self.id = str(coin.get("id") or "")
@@ -176,6 +177,7 @@ class Candidate:
         self.profile: dict[str, Any] | None = None
         self.contract_raw: dict[str, Any] | None = None
         self.has_perp = self.symbol in perps
+        self.early_categories = (binance_categories or {}).get(self.id, set())
         self.dossier: dict[str, Any] = {
             "mode": mode,
             "asset": {"id": self.id, "symbol": self.symbol, "name": self.coin.get("name")},
@@ -204,13 +206,13 @@ class Candidate:
                                                           m["market_cap_usd"], p30)
         self.dossier["tokenomics"] = build_tokenomics(self.coin, supply_growth_30d(caps, prices),
                                                       self.unlocks, holders)
-        self.dossier["venue"] = self._venue()
         if self.mode == "pre_listing":
-            self.dossier["listing"] = build_listing(self.profile, self.has_perp)
+            self.dossier["listing"] = build_listing(self.profile, self.has_perp, self.early_categories)
             self.dossier["contract"] = build_contract(self.contract_raw)
         else:
             self.dossier["listing"] = {"available": False}
             self.dossier["contract"] = {"available": False, "status": None}
+        self.dossier["venue"] = self._venue()  # after listing: venue order uses the tier-1 list
         self.dossier["scores"] = compute_scores(self.dossier, enabled_layers(self.mode))
         self.dossier["vetoes"] = compute_vetoes(self.dossier)
 
@@ -219,7 +221,10 @@ class Candidate:
             return ({"exchange": "Binance", "binance": True, "pair": self.venue["symbol"],
                      "last_price": self.venue["last_price"]} if self.venue else None)
         profile = self.profile or {}
-        cex, dex = profile.get("cex") or [], profile.get("dex") or []
+        # Tier-1 exchanges first (where a reader would actually buy), then the rest by volume.
+        tier1 = (self.dossier.get("listing") or {}).get("tier1_cex") or []
+        cex = [x for x in (profile.get("cex") or []) if x in tier1] + [x for x in (profile.get("cex") or []) if x not in tier1]
+        dex = profile.get("dex") or []
         # Off Binance there is no single venue price: CoinGecko's aggregate is the reference.
         return {"exchange": (cex or dex or [None])[0], "binance": False, "cex": cex[:3], "dex": dex[:2],
                 "last_price": self.price}
@@ -227,6 +232,10 @@ class Candidate:
     @property
     def composite(self) -> float:
         return self.dossier["scores"]["composite"]
+
+    def could_pass_the_rule(self) -> bool:
+        """Pre-listing: fundamentals or a known Binance signal. Checked BEFORE spending deep slots."""
+        return bool(self.ctx) or self.has_perp or bool(self.early_categories)
 
     def eligible_for_ai(self, min_score: float) -> bool:
         scores = self.dossier["scores"]
@@ -401,12 +410,27 @@ def _perps() -> set[str]:
     return safe_call("Binance Futures (perpétuos)", futures.perp_bases, set()) if settings.enable_pre_listing else set()
 
 
+def _binance_categories() -> dict[str, set[str]]:
+    """coin id -> Binance program categories it belongs to (bulk, one call per category)."""
+    if not settings.enable_pre_listing:
+        return {}
+    out: dict[str, set[str]] = {}
+    for cat_id, name in P.BINANCE_CATEGORY_IDS.items():
+        for coin_id in safe_call(f"Categoria {cat_id}", lambda c=cat_id: cg.category_ids(c), set()):
+            out.setdefault(coin_id, set()).add(name)
+    return out
+
+
 def _run_mode(mode: str, universe: list[Candidate], skip_symbol, watch: set[str],
               min_score: float) -> tuple[list[Candidate], list[Candidate], list[Candidate]]:
     """Stages 2 and 3 for one mode. Returns (deep, vetoed, finalists)."""
     universe.sort(key=lambda c: c.composite, reverse=True)
     # Cooldown before any per-coin call: repeated symbols cost nothing.
     fresh = [c for c in universe if not (skip_symbol and skip_symbol(c.symbol))]
+    if mode == "pre_listing":
+        # Real case: all 8 deep slots went to coins with neither fundamentals nor a Binance
+        # signal, which the final rule then discarded. Spend slots only on possible passes.
+        fresh = [c for c in fresh if c.could_pass_the_rule() or c.symbol in watch]
     stage2 = _pick(fresh, P.TREND_CANDIDATES, watch)
 
     if mode == "binance":
@@ -440,6 +464,7 @@ def scan_candidates(skip_symbol: Callable[[str], bool] | None = None,
     regime = get_market_regime(coins)
     bulk = load_bulk()
     perps = _perps()
+    categories = _binance_categories()
 
     by_mode: dict[str, list[Candidate]] = {"binance": [], "pre_listing": []}
     for rank, coin in enumerate(coins):
@@ -447,7 +472,7 @@ def scan_candidates(skip_symbol: Callable[[str], bool] | None = None,
         if mode == "binance" and rank >= settings.top_coins_to_scan:
             continue
         if mode and not prefilter(coin, mode):
-            by_mode[mode].append(Candidate(coin, bulk, regime, mode, perps))
+            by_mode[mode].append(Candidate(coin, bulk, regime, mode, perps, categories))
 
     deep, vetoed, finalists = [], [], []
     for mode, universe in by_mode.items():
@@ -504,7 +529,8 @@ def analyze_symbol(query_symbol: str) -> dict[str, Any] | None:
 
     regime = get_market_regime(coins)
     mode = _mode_of(coin) or "binance"
-    c = Candidate(coin, load_bulk(), regime, mode, _perps() if mode == "pre_listing" else set())
+    pre = mode == "pre_listing"
+    c = Candidate(coin, load_bulk(), regime, mode, _perps() if pre else set(), _binance_categories() if pre else {})
     if mode == "binance":
         c.venue = binance_venue(symbol, c.price)
     add_history(c)

@@ -44,6 +44,18 @@ MAJOR_CEX = {
     "bithumb": "Bithumb", "bitget": "Bitget", "kucoin": "KuCoin", "gate": "Gate", "mxc": "MEXC",
 }
 TIER1_CEX = {"gdax", "okex", "bybit_spot", "upbit", "kraken", "bithumb"}
+# CoinGecko category id -> name, fetched in bulk so Binance signals are known before
+# the deep stage (and the deep slots go to assets that can pass the "with fundamentals" rule).
+BINANCE_CATEGORY_IDS = {
+    "binance-alpha-spotlight": "Binance Alpha Spotlight",
+    "yzi-labs-portfolio": "YZi Labs (Prev. Binance Labs) Portfolio",
+    "binance-hodler-airdrops": "Binance HODLer Airdrops",
+    "binance-launchpool": "Binance Launchpool",
+    "binance-launchpad": "Binance Launchpad",
+    "binance-megadrop": "Binance Megadrop",
+    "binance-wallet-ido": "Binance Wallet IDO",
+    "binance-buildkey-tge": "Binance Buildkey TGE",
+}
 # Binance programs that usually precede or accompany a spot listing (CoinGecko categories).
 BINANCE_PROGRAM_CATEGORIES = {
     "Binance Alpha Spotlight": "binance_alpha",
@@ -139,6 +151,7 @@ CACHE_TTL = {
     # Daily candles: 12h keeps the reading and the CoinGecko Demo quota (10k/month) safe.
     "coingecko_history": 12 * 3600,
     "coingecko_profile": 24 * 3600,
+    "coingecko_category": 12 * 3600,
     "binance_perps": 6 * 3600,
     "contract_security": 24 * 3600,
     "fear_greed": 3600,
