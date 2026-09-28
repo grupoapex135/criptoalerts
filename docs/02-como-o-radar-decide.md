@@ -225,7 +225,7 @@ Base 30. Um ativo que já tem mercado na Binance (outro ticker) é **vetado** aq
 
 **Contrato** (GoPlus, grátis, EVM e Solana): sinais graves vetam (`contract_risk`); os moderados (emissão liberada, pausa de transferências, blacklist, proxy, código fechado, top 10 carteiras com > 50%) viram risco e aparecem na mensagem. Moedas nativas (sem contrato) não passam por essa checagem.
 
-**"Com fundamento" é regra para chegar à IA:** fundamentos no DefiLlama **ou** pelo menos um sinal oficial da Binance. Token só-DEX sem contrato checado não vai. Abaixo de US$ 30M: nota mínima +5 e cobertura ≥ 70%.
+**"Com fundamento" é regra para chegar à IA:** fundamentos no DefiLlama **ou** um sinal oficial da Binance num projeto com descrição oficial e fora da categoria Meme do CoinGecko. Memecoin só passa com protocolo e dados por trás. A regra é aplicada **antes** do estágio profundo, para as vagas irem só para quem pode passar. Token só-DEX sem contrato checado não vai. Abaixo de US$ 30M: nota mínima +5 e cobertura ≥ 70%.
 
 **Cotas:** até 15 ativos com histórico, 8 com dados profundos e 3 na IA por varredura (`PRE_LISTING_MAX_AI_CANDIDATES`), separados das cotas do modo Binance.
 

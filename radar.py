@@ -152,7 +152,7 @@ class Candidate:
 
     def __init__(self, coin: dict[str, Any], bulk: dict[str, Any], regime: dict[str, Any],
                  mode: str = "binance", perps: set[str] | frozenset = frozenset(),
-                 binance_categories: dict[str, set[str]] | None = None):
+                 binance_categories: dict[str, set[str]] | None = None, meme_ids: set[str] | None = None):
         self.coin = coin
         self.mode = mode
         self.id = str(coin.get("id") or "")
@@ -178,6 +178,7 @@ class Candidate:
         self.contract_raw: dict[str, Any] | None = None
         self.has_perp = self.symbol in perps
         self.early_categories = (binance_categories or {}).get(self.id, set())
+        self.is_meme = self.id in (meme_ids or set())
         self.dossier: dict[str, Any] = {
             "mode": mode,
             "asset": {"id": self.id, "symbol": self.symbol, "name": self.coin.get("name")},
@@ -207,7 +208,7 @@ class Candidate:
         self.dossier["tokenomics"] = build_tokenomics(self.coin, supply_growth_30d(caps, prices),
                                                       self.unlocks, holders)
         if self.mode == "pre_listing":
-            self.dossier["listing"] = build_listing(self.profile, self.has_perp, self.early_categories)
+            self.dossier["listing"] = build_listing(self.profile, self.has_perp, self.early_categories, self.is_meme)
             self.dossier["contract"] = build_contract(self.contract_raw)
         else:
             self.dossier["listing"] = {"available": False}
@@ -234,8 +235,11 @@ class Candidate:
         return self.dossier["scores"]["composite"]
 
     def could_pass_the_rule(self) -> bool:
-        """Pre-listing: fundamentals or a known Binance signal. Checked BEFORE spending deep slots."""
-        return bool(self.ctx) or self.has_perp or bool(self.early_categories)
+        """
+        Pre-listing rule, checked BEFORE spending deep slots: DefiLlama fundamentals, or a
+        Binance signal on something that is not a memecoin (the goal is fundamentals).
+        """
+        return bool(self.ctx) or ((self.has_perp or bool(self.early_categories)) and not self.is_meme)
 
     def eligible_for_ai(self, min_score: float) -> bool:
         scores = self.dossier["scores"]
@@ -249,8 +253,10 @@ class Candidate:
             has_fundamentals = (self.dossier.get("fundamentals") or {}).get("available")
             has_binance_signal = any(listing.get(k) for k in (
                 "binance_alpha", "binance_perp_without_spot", "yzi_labs", "binance_programs"))
-            # The goal is assets WITH fundamentals before a Binance listing, not random small caps.
-            if not (has_fundamentals or has_binance_signal):
+            # The goal is assets WITH fundamentals before a Binance listing. Without DefiLlama
+            # data, a Binance signal only counts for a real project: official description, not a meme.
+            has_project = bool(self.dossier["asset"].get("description")) and not listing.get("meme")
+            if not (has_fundamentals or (has_binance_signal and has_project)):
                 return False
             # A DEX-only token whose contract could not be checked is not worth the risk.
             if listing.get("dex_only") and not contract.get("available"):
@@ -289,7 +295,7 @@ def add_deep_data(c: Candidate, hacks: list[dict[str, Any]], headlines: dict[str
         c.unlocks = safe_call(f"Tokenomist {c.symbol}",
                               lambda: tokenomist.unlocks(c.id, c.symbol, to_float(c.coin.get("circulating_supply"))))
 
-    if c.ctx:
+    if c.ctx and c.ctx.get("slug"):
         series = safe_call(f"TVL histórico {c.symbol}", lambda: llama.tvl_series(c.ctx["kind"], c.ctx["slug"])) or []
         c.tvl_change_30d = pct_change(series[-1], series[-31]) if len(series) > 30 else None
 
@@ -410,6 +416,12 @@ def _perps() -> set[str]:
     return safe_call("Binance Futures (perpétuos)", futures.perp_bases, set()) if settings.enable_pre_listing else set()
 
 
+def _meme_ids() -> set[str]:
+    if not settings.enable_pre_listing:
+        return set()
+    return safe_call("Categoria meme", lambda: cg.category_ids(P.MEME_CATEGORY_ID), set())
+
+
 def _binance_categories() -> dict[str, set[str]]:
     """coin id -> Binance program categories it belongs to (bulk, one call per category)."""
     if not settings.enable_pre_listing:
@@ -465,6 +477,7 @@ def scan_candidates(skip_symbol: Callable[[str], bool] | None = None,
     bulk = load_bulk()
     perps = _perps()
     categories = _binance_categories()
+    memes = _meme_ids()
 
     by_mode: dict[str, list[Candidate]] = {"binance": [], "pre_listing": []}
     for rank, coin in enumerate(coins):
@@ -472,7 +485,7 @@ def scan_candidates(skip_symbol: Callable[[str], bool] | None = None,
         if mode == "binance" and rank >= settings.top_coins_to_scan:
             continue
         if mode and not prefilter(coin, mode):
-            by_mode[mode].append(Candidate(coin, bulk, regime, mode, perps, categories))
+            by_mode[mode].append(Candidate(coin, bulk, regime, mode, perps, categories, memes))
 
     deep, vetoed, finalists = [], [], []
     for mode, universe in by_mode.items():
@@ -530,7 +543,8 @@ def analyze_symbol(query_symbol: str) -> dict[str, Any] | None:
     regime = get_market_regime(coins)
     mode = _mode_of(coin) or "binance"
     pre = mode == "pre_listing"
-    c = Candidate(coin, load_bulk(), regime, mode, _perps() if pre else set(), _binance_categories() if pre else {})
+    c = Candidate(coin, load_bulk(), regime, mode, _perps() if pre else set(), _binance_categories() if pre else {},
+                  _meme_ids() if pre else set())
     if mode == "binance":
         c.venue = binance_venue(symbol, c.price)
     add_history(c)

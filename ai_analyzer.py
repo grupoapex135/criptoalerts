@@ -34,6 +34,8 @@ Two modes (dossier.mode):
   NEVER claim, imply or promise a Binance listing. Weigh liquidity, where it trades
   (venue.cex / venue.dex) and contract risk (contract.severe, contract.warnings, holder
   concentration). DEX-only assets and small caps need clearly stronger evidence.
+  listing.meme=true means a memecoin: it only reached you because a real protocol backs it
+  (fundamentals.available); judge the protocol, never the meme.
 
 Horizon: medium/long term — weeks to a few months (signals are tracked for up to
 {settings.opportunity_expiry_days} days). Targets reflect a medium-term move (prior range highs, the 200d

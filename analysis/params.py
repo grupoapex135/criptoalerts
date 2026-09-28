@@ -56,6 +56,9 @@ BINANCE_CATEGORY_IDS = {
     "binance-wallet-ido": "Binance Wallet IDO",
     "binance-buildkey-tge": "Binance Buildkey TGE",
 }
+# Pre-Binance requires fundamentals (Gabriel's call): memecoins only pass with a real
+# protocol behind them (DefiLlama data). CoinGecko "Meme" category, fetched in bulk.
+MEME_CATEGORY_ID = "meme-token"
 # Binance programs that usually precede or accompany a spot listing (CoinGecko categories).
 BINANCE_PROGRAM_CATEGORIES = {
     "Binance Alpha Spotlight": "binance_alpha",

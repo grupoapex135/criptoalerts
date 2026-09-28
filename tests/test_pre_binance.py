@@ -98,11 +98,11 @@ def pre_mocked():
     prices = {**{c["symbol"].upper(): c["current_price"] for c in (BTC, ETH, PENDLE)}}
 
     def hist(coin_id, days=None):
-        if coin_id in ("instadapp", "tiny"):
-            price = FLUID["current_price"] if coin_id == "instadapp" else TINY["current_price"]
-            closes = uptrend_closes(90, price * 0.7, price * 1.03)
-            return {"prices": closes, "market_caps": [p * 1e8 for p in closes]}
-        return history(coin_id)
+        if coin_id in ("bitcoin", "ethereum", "pendle"):
+            return history(coin_id)
+        price = {"instadapp": FLUID["current_price"], "tiny": TINY["current_price"]}.get(coin_id, 1.0)
+        closes = uptrend_closes(90, price * 0.7, price * 1.03)
+        return {"prices": closes, "market_caps": [p * 1e8 for p in closes]}
 
     with ExitStack() as st:
         p = lambda obj, name, **kw: st.enter_context(mock.patch.object(obj, name, **kw))  # noqa: E731
@@ -116,6 +116,7 @@ def pre_mocked():
         p(radar.llama, "chains", return_value=[])
         p(radar.llama, "overview", return_value=[])
         p(radar.llama, "hacks", return_value=hacks)
+        p(radar.llama, "tvl_series", return_value=[])
         p(radar.binance, "spot_pair", side_effect=lambda s: f"{s.upper()}USDT" if s.upper() == "PENDLE" else None)
         p(radar.binance, "tickers", side_effect=lambda pairs: tickers(pairs) if all(x[:-4] in prices for x in pairs) else {})
         p(radar.futures, "derivatives", return_value={"source": "binance_futures", "funding_rate_pct": 0.01,
@@ -296,3 +297,45 @@ def test_venues_list_tier1_exchanges_first(pre_mocked):
     report = radar.evaluate_candidates()
     fluid = next(r for r in report["results"] if r["dossier"]["asset"]["symbol"] == "FLUID")
     assert fluid["dossier"]["venue"]["cex"] == ["Upbit", "Coinbase", "HTX"]
+
+
+# ------------------------------------------------------------------ "exigir fundamento" (Gabriel, 28/09)
+def _meme_setup(pre_mocked, meme_ids, with_fundamentals=False):
+    meme = make_coin(id="moo-deng", symbol="moodeng", name="Moo Deng", current_price=0.05, market_cap=46e6,
+                     total_volume=20e6, fully_diluted_valuation=46e6)
+    radar.cg.markets.return_value = [BTC, ETH, PENDLE, FLUID, meme]
+    radar.futures.perp_bases.return_value = {"FLUID", "MOODENG"}
+    radar.cg.category_ids.side_effect = lambda cat: meme_ids if cat == "meme-token" else set()
+    if with_fundamentals:
+        radar.llama.protocols.return_value = [{"id": "77", "name": "Moo Deng Protocol", "symbol": "MOODENG",
+                                               "gecko_id": "moo-deng", "category": "Dexs", "tvl": 50e6}]
+    return {c.args[0]["asset"]["symbol"] for c in pre_mocked["analyze"].call_args_list}
+
+
+def test_memecoin_with_binance_signals_but_no_fundamentals_is_out(pre_mocked):
+    # Real case: POPCAT, MOODENG and MEW passed on Binance Alpha + perpetual alone.
+    _meme_setup(pre_mocked, {"moo-deng"})
+    radar.evaluate_candidates()
+    seen = {c.args[0]["asset"]["symbol"] for c in pre_mocked["analyze"].call_args_list}
+    assert "MOODENG" not in seen and "FLUID" in seen
+    assert "moo-deng" not in {c.args[0] for c in radar.cg.coin_profile.call_args_list}  # no deep slot spent
+
+
+def test_memecoin_with_a_real_protocol_can_pass(pre_mocked):
+    _meme_setup(pre_mocked, {"moo-deng"}, with_fundamentals=True)
+    radar.evaluate_candidates()
+    seen = {c.args[0]["asset"]["symbol"] for c in pre_mocked["analyze"].call_args_list}
+    assert "MOODENG" in seen
+
+
+def test_binance_signal_without_official_description_is_not_enough(pre_mocked):
+    radar.cg.coin_profile.side_effect = lambda cid: {**FLUID_PROFILE, "description": None}
+    radar.evaluate_candidates()
+    seen = {c.args[0]["asset"]["symbol"] for c in pre_mocked["analyze"].call_args_list}
+    assert "FLUID" not in seen
+
+
+def test_meme_flag_from_profile_categories():
+    from analysis.listing import build_listing
+    assert build_listing({"categories": ["Solana Meme", "Binance Alpha Spotlight"]}, True)["meme"] is True
+    assert build_listing({"categories": ["Decentralized Finance (DeFi)"]}, True)["meme"] is False

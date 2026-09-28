@@ -9,7 +9,7 @@ from analysis.params import BINANCE_PROGRAM_CATEGORIES, MAJOR_CEX, TIER1_CEX
 
 
 def build_listing(profile: dict[str, Any] | None, has_binance_perp: bool,
-                  early_categories: set[str] | frozenset = frozenset()) -> dict[str, Any]:
+                  early_categories: set[str] | frozenset = frozenset(), meme: bool = False) -> dict[str, Any]:
     profile = profile or {}
     # Categories known from the bulk category lists (before the profile) count too.
     categories = set(profile.get("categories") or []) | set(early_categories)
@@ -30,6 +30,8 @@ def build_listing(profile: dict[str, Any] | None, has_binance_perp: bool,
         "dex_only": bool(dex) and not cex,
         # CoinGecko lists a Binance market for it: it is already on Binance (renamed ticker, e.g. BTT/BTTC).
         "already_on_binance": "binance" in cex_ids,
+        # Any CoinGecko category with "meme" in it (Meme, Solana Meme, AI Meme...).
+        "meme": meme or any("meme" in c.lower() for c in categories),
     }
 
 

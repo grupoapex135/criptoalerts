@@ -189,7 +189,7 @@ Cada camada devolve dados estruturados e uma subnota de 0 a 100 — ou `None` qu
 
 **Vetos bloqueiam o alerta, não importa a média:** unlock crítico em 30 dias · oferta inflando demais · liquidez muito baixa · hack/exploit recente · `risk_off` + tendência de baixa · FDV ÷ market cap absurdo · alta alavancada (preço +15%, OI +40%, funding quente) · **contrato com risco grave** · **já negocia na Binance com outro ticker** (não é pré-listagem).
 
-**No Pré-Binance, "com fundamento" é regra:** para chegar à IA o ativo precisa ter fundamentos no DefiLlama **ou** pelo menos um sinal oficial da Binance; se só negocia em DEX, o contrato tem de ter sido checado; abaixo de US$ 30M, exige nota maior e 70% de cobertura. Ações tokenizadas, embrulhados, staking e ativos lastreados são excluídos por nome.
+**No Pré-Binance, "com fundamento" é regra:** para chegar à IA o ativo precisa ter fundamentos no DefiLlama **ou** um sinal oficial da Binance **num projeto de verdade** (descrição oficial e fora da categoria Meme — memecoin só passa se houver protocolo com dados por trás); se só negocia em DEX, o contrato tem de ter sido checado; abaixo de US$ 30M, exige nota maior e 70% de cobertura. Ações tokenizadas, embrulhados, staking e ativos lastreados são excluídos por nome.
 
 Detalhes, fórmulas e thresholds: **[Como o radar decide](docs/02-como-o-radar-decide.md)**.
 
@@ -275,7 +275,7 @@ Pesos das camadas, thresholds de tendência, derivativos, social e TTLs de cache
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                 # 160 testes; qualquer acesso à internet reprova o teste
+pytest                 # 172 testes; qualquer acesso à internet reprova o teste
 ruff check .           # erros reais: imports, nomes indefinidos, sintaxe
 python smoke_test.py   # checagem contra as APIs reais (--ai inclui uma análise paga)
 ```

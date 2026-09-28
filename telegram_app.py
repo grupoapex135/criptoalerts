@@ -229,6 +229,8 @@ def _listing(d: dict[str, Any]) -> list[str]:
         out.append("• Programas Binance: " + ", ".join(p.replace("Binance ", "") for p in ls["binance_programs"]))
     if not out:
         out.append("• Nenhum sinal oficial da Binance ainda")
+    if ls.get("meme"):
+        out.append("• 🐸 Memecoin — o que sustenta é o protocolo, não o meme")
     if ls.get("tier1_cex"):
         out.append("• Corretoras tier-1: " + ", ".join(ls["tier1_cex"]))
     elif ls.get("dex_only"):
