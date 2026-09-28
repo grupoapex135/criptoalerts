@@ -1,5 +1,7 @@
 """Telegram layer: short messages, authorization and the scan/tracking jobs (bot mocked)."""
 import asyncio
+
+import pytest
 from unittest import mock
 
 import telegram_app as T
@@ -226,3 +228,42 @@ class TestJobs:
             asyncio.run(T.scanner_job(ctx))
         assert ctx.bot.send_message.await_count == 1
         assert T.STATE["last_scan_error"] == "429 CoinGecko"
+
+
+class TestSendRetry:
+    def _bot(self, *effects):
+        bot = mock.MagicMock()
+        bot.send_message = mock.AsyncMock(side_effect=list(effects))
+        return bot
+
+    def test_network_blip_is_retried(self):
+        # Real case: a TLS ConnectError during send lost the LDO alert.
+        from telegram.error import NetworkError
+        bot = self._bot(NetworkError("ConnectError"), NetworkError("ConnectError"), "ok")
+        with mock.patch.object(T.asyncio, "sleep", new=mock.AsyncMock()):
+            assert asyncio.run(T.send_text(bot, "oi")) == "ok"
+        assert bot.send_message.await_count == 3
+
+    def test_bad_request_is_not_retried(self):
+        from telegram.error import BadRequest
+        bot = self._bot(BadRequest("chat not found"))
+        with mock.patch.object(T.asyncio, "sleep", new=mock.AsyncMock()):
+            with pytest.raises(BadRequest):
+                asyncio.run(T.send_text(bot, "oi"))
+        assert bot.send_message.await_count == 1
+
+    def test_flood_control_waits_and_retries(self):
+        from telegram.error import RetryAfter
+        bot = self._bot(RetryAfter(5), "ok")
+        sleep = mock.AsyncMock()
+        with mock.patch.object(T.asyncio, "sleep", new=sleep):
+            assert asyncio.run(T.send_text(bot, "oi")) == "ok"
+        sleep.assert_awaited_once_with(6.0)
+
+    def test_gives_up_after_three_attempts(self):
+        from telegram.error import NetworkError
+        bot = self._bot(*[NetworkError("down")] * 3)
+        with mock.patch.object(T.asyncio, "sleep", new=mock.AsyncMock()):
+            with pytest.raises(NetworkError):
+                asyncio.run(T.send_text(bot, "oi"))
+        assert bot.send_message.await_count == 3

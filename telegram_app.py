@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 from telegram import BotCommand, Update
+from telegram.error import BadRequest, NetworkError, RetryAfter
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -328,6 +329,28 @@ def tracking_message(opp: dict[str, Any]) -> str:
         move += f" ({opp['result_pct']:+.1f}% desde a entrada)"
     return f"{head}\n{move}"
 
+async def send_text(bot, text: str, attempts: int = 3):
+    """
+    Sends to the configured chat, retrying what a retry can fix: network blips
+    (real case: a TLS ConnectError lost an alert) and flood control (RetryAfter).
+    BadRequest subclasses NetworkError in python-telegram-bot and is never retried.
+    """
+    for attempt in range(attempts):
+        last = attempt == attempts - 1
+        try:
+            return await bot.send_message(chat_id=settings.telegram_chat_id, text=text)
+        except RetryAfter as exc:
+            if last:
+                raise
+            wait = exc.retry_after
+            await asyncio.sleep((wait.total_seconds() if hasattr(wait, "total_seconds") else float(wait)) + 1)
+        except BadRequest:
+            raise
+        except NetworkError:
+            if last:
+                raise
+            await asyncio.sleep(2 * (attempt + 1))
+
 # ------------------------------------------------------------------ auth + errors
 def _is_authorized(update: Update) -> bool:
     return bool(settings.telegram_chat_id) and str(update.effective_chat.id) == settings.telegram_chat_id
@@ -353,10 +376,7 @@ async def _notify_error(context: ContextTypes.DEFAULT_TYPE, text: str):
         return
     STATE["last_error_notice_at"] = now
     try:
-        await context.bot.send_message(
-            chat_id=settings.telegram_chat_id,
-            text=f"⚠️ Crypto Radar com problema\n\n{text[:3500]}\n\nDetalhes: /status",
-        )
+        await send_text(context.bot, f"⚠️ Crypto Radar com problema\n\n{text[:3500]}\n\nDetalhes: /status")
     except Exception:
         log.exception("Falha ao avisar erro no Telegram")
 
@@ -371,8 +391,9 @@ async def send_opportunity(context: ContextTypes.DEFAULT_TYPE, result: dict):
         return
 
     msg = opportunity_message(result)
-    await context.bot.send_message(chat_id=chat_id, text=msg)
+    await send_text(context.bot, msg)
     STATE["alerts_sent"] += 1
+    log.info("[alerta] enviado: %s (%s)", symbol, d.get("mode") or "binance")
 
     row = {
         "symbol": symbol,
@@ -446,7 +467,7 @@ async def tracker_job(context: ContextTypes.DEFAULT_TYPE):
         return
     for opp in changed:
         try:
-            await context.bot.send_message(chat_id=settings.telegram_chat_id, text=tracking_message(opp))
+            await send_text(context.bot, tracking_message(opp))
         except Exception:
             log.exception("[tracker] falha ao avisar %s", opp.get("symbol"))
 
@@ -655,11 +676,12 @@ async def _on_startup(app: Application):
         BotCommand("id", "Mostra seu chat ID"),
     ])
     if settings.telegram_chat_id:
-        # Every restart shows up in the chat, so crash loops are visible.
-        await app.bot.send_message(
-            chat_id=settings.telegram_chat_id,
-            text=f"🟢 Crypto Radar iniciado. Varredura a cada {settings.scan_interval_minutes} min. /status",
-        )
+        # Every restart shows up in the chat, so crash loops are visible. A network blip
+        # here must not keep the bot from starting.
+        try:
+            await send_text(app.bot, f"🟢 Crypto Radar iniciado. Varredura a cada {settings.scan_interval_minutes} min. /status")
+        except Exception:
+            log.exception("Falha ao avisar o início no Telegram")
 
 def build_app() -> Application:
     if not settings.telegram_bot_token:
