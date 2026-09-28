@@ -37,65 +37,28 @@ O radar trabalha em **dois modos**, lado a lado:
 > [!IMPORTANT]
 > Ninguém sabe o que a Binance vai listar — ela não publica isso. O modo Pré-Binance **não prevê listagens**: ele encontra ativos com fundamento fora da Binance e mostra os indícios. O placar registra, sem esconder, quantos sinais foram de fato listados depois.
 
-A complexidade fica no backend. No Telegram chega uma nota de pesquisa curta: o que o projeto faz e por que tem utilidade, valuation, técnico, contexto de mercado e um plano de referência — em português simples. Não existe dashboard — alertas, comandos, placar e avisos de erro acontecem no chat.
+A complexidade fica no backend. No Telegram chega uma mensagem curta, feita para decidir rápido — e o relatório completo só quando você pede (`/detalhe`). Não existe dashboard — alertas, comandos, placar e avisos de erro acontecem no chat.
 
 ## <a id="exemplo"></a>📨 Como chega um alerta
 
-Uma nota de pesquisa curta, em seções, que explica **o que é o projeto** antes de falar de preço — para separar fundamento de ruído. Linha sem dado não aparece.
+Curto, para decidir em segundos: veredito, uma linha do que o projeto faz, até 3 pontos a favor e 3 contra, e o plano. O relatório completo (tese, valuation, técnico, macro, sinais de listagem) vem só quando você pede, com `/detalhe`.
 
 ```text
-💎 OPORTUNIDADE · 🟢 BINANCE — $LDO (Lido DAO)
+🟢 OPORTUNIDADE · 🚀 PRÉ-BINANCE
+$FLUID — Fluid
+Lending e DEX na mesma liquidez; parte da receita volta aos holders.
 
-📌 TESE E UTILIDADE
-Maior protocolo de staking líquido de Ethereum: transforma ETH em stETH,
-que rende e continua utilizável em DeFi.
+✅ Binance Alpha · Perp na Binance · Receita +24%
+⚠️ Top 10 com 53%
 
-📊 VALUATION & SAÚDE
-• Preço: $1.2 (-74% do topo histórico)
-• Par BTC: 0.00001440 BTC · -38% da máxima de 221d contra o BTC
-• FDV / Market cap: 1,21 · 83% em circulação
-• Diluição: 🟢 baixa — oferta -0.6% em 30d
-• Captura de valor: receita repassada a holders ($1.2M/30d)
-• Receita 30d: $3.1M (+27%) · P/receita 10x
-• TVL: $26.3B (+11% em 30d)
+Entrada $3.90–$4.05 · Upbit, Bybit, DEX
+🎯 $5.20 (+30.0%) · 🛑 $3.40 (-15.0%)
+Risco Médio · Confiança 72% · Limite R$ 600,00
 
-📉 TÉCNICO & CICLO
-• Tendência: alta, recuo saudável · +8% da MA50
-• Médias 50/200d: cruz de ouro recente 🟡
-• RSI: 44 diário · 38 semanal
-• Alavancagem: 🟢 desalavancado (funding 0.004%, OI -18% em 24h)
-
-🌍 CONTEXTO MACRO
-• Mercado: 🟢 favorável — BTC -2.0% em 7d, +7.8% em 30d
-• Sentimento: Medo (Fear & Greed 38)
-
-✅ POR QUE AGORA
-Receita e TVL crescendo, mercado desalavancado e sem pressão de unlock.
-
-🎯 PLANO DE REFERÊNCIA
-Entrada: $1.18 – $1.22 · Binance
-🎯 Alvo: $1.42 (+18.3%) · 🛑 Invalidação: $1.09 (-9.2%)
-Risco: Médio · Limite: R$ 600,00
-💡 Entradas fracionadas dentro da zona, respeitando a invalidação.
-
-⚠️ Pesquisa, não recomendação. Principal risco: queda do ETH arrastando o setor.
+Detalhes: /detalhe FLUID
 ```
 
-No modo Pré-Binance, a nota ganha uma seção própria e o "onde" mostra as corretoras e DEX onde o ativo negocia:
-
-```text
-💎 OPORTUNIDADE · 🚀 PRÉ-BINANCE — $FLUID (Fluid)
-
-🔎 SINAIS DE LISTAGEM
-• Binance Alpha Spotlight ✅
-• Perpétuo na Binance Futures, ainda sem spot ✅
-• Corretoras tier-1: Bybit, Coinbase, Upbit
-• Contrato (ethereum): 🟡 top 10 carteiras com 53%
-...
-Entrada: $3.90 – $4.05 · Upbit, Bybit, Gate · DEX: Uniswap V3
-```
-
-<sub>Exemplo ilustrativo. A tese é escrita pela IA **só a partir da descrição e das categorias oficiais** do projeto (CoinGecko/DefiLlama) — nada de parcerias ou notícias inventadas. O "limite" é o teto por posição que *você* define no `.env` e cai pela metade quando o mercado está em risco.</sub>
+<sub>Exemplo ilustrativo. 🟢 BINANCE = já listada · 🚀 PRÉ-BINANCE = ainda fora do spot da Binance. A linha do projeto é escrita pela IA **só a partir da descrição e das categorias oficiais** (CoinGecko/DefiLlama). Os ✅/⚠️ são escolhidos pelo código a partir dos dados, não pela IA. O "limite" é o teto por posição do seu `.env` e cai pela metade com o mercado em risco.</sub>
 
 ## 🧭 Índice
 
@@ -220,7 +183,8 @@ Cada provedor tem timeout, retry limitado e cache com TTL. Se um cair, a camada 
 | Comando | O que faz |
 |---|---|
 | `/scan` | Roda a varredura agora; alertas saem como no automático e o resumo mostra o funil |
-| `/analyze PENDLE` | Análise completa de um ativo, com um pouco mais de contexto |
+| `/analyze PENDLE` | Analisa um ativo agora (resposta curta, mesmo formato do alerta) |
+| `/detalhe PENDLE` | Relatório completo da última análise daquele ativo — sem nova chamada à IA |
 | `/status` | Placar dos sinais + saúde do radar e das fontes |
 | `/watch PENDLE` | Garante que o ativo sempre recebe análise completa · `/watch` sozinho lista |
 | `/unwatch PENDLE` | Tira da lista de observação |
@@ -275,7 +239,7 @@ Pesos das camadas, thresholds de tendência, derivativos, social e TTLs de cache
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                 # 172 testes; qualquer acesso à internet reprova o teste
+pytest                 # 177 testes; qualquer acesso à internet reprova o teste
 ruff check .           # erros reais: imports, nomes indefinidos, sintaxe
 python smoke_test.py   # checagem contra as APIs reais (--ai inclui uma análise paga)
 ```

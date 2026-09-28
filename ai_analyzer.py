@@ -51,16 +51,17 @@ Price levels (research reference zones, not guarantees):
 
 Text fields, in simple Portuguese for a non-expert reader. No English jargon and
 no field names: say "tendência de alta", not "uptrend"; "mercado favorável", not "risk_on".
-- thesis: max 240 characters. What the project does and why that has real utility,
+- thesis: max 110 characters. What the project does and why that has real utility,
   so a newcomer understands the fundamentals behind the noise. Base it ONLY on
   asset.description, asset.categories and fundamentals. Never invent partners,
   clients, banks, launches or news. If asset.description is null, write
   "Sem descrição oficial do projeto disponível."
-- short_reason: max 160 characters, why NOW (what converged in the data).
-- plan: max 160 characters, a reference plan for "alert"/"watch" (e.g. staggered
+- short_reason: max 120 characters, why NOW (what converged in the data).
+- plan: max 110 characters, a reference plan for "alert"/"watch" (e.g. staggered
   entries inside the zone, respecting the invalidation, or what to wait for);
   empty string for "reject". Never promise returns.
-- main_risk: max 120 characters, the single biggest risk.
+- main_risk: max 90 characters, the single biggest risk.
+Be direct: the reader decides in seconds. No filler, no repetition of numbers.
 """
 
 _NUM_OR_NULL = {"type": ["number", "null"]}

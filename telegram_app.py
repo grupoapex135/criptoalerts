@@ -56,6 +56,8 @@ STATE: dict[str, Any] = {
     "last_scan_error": None,
     "alerts_sent": 0,
     "last_error_notice_at": None,
+    # symbol -> last full analysis, so /detalhe shows the report without a new AI call
+    "last_results": {},
 }
 _scan_lock: asyncio.Lock | None = None
 
@@ -290,18 +292,135 @@ def research_message(result: dict, header: str, footer: list[str] | None = None)
         lines.extend(["", *footer])
     return "\n".join(lines)
 
-def opportunity_message(result: dict) -> str:
-    a = result["ai"]
-    return research_message(result, "💎 OPORTUNIDADE", [f"⚠️ Pesquisa, não recomendação. Principal risco: {a['main_risk']}"])
+def _short(text: str | None, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(",;:–-")
+    return cut + "…"
 
-def manual_analysis_message(result: dict) -> str:
-    d, a = result["dossier"], result.get("ai")
-    vetoes = d.get("vetoes") or []
-    header = {
-        "alert": "🟢 ALERTA",
+def _chips(d: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Up to 3 reasons for and 3 against, picked by the code from the dossier (most decisive first)."""
+    ls, ct = d.get("listing") or {}, d.get("contract") or {}
+    f, tk = d.get("fundamentals") or {}, d.get("tokenomics") or {}
+    tr, der = d.get("trend") or {}, d.get("derivatives") or {}
+    pos: list[str] = []
+    neg: list[str] = []
+    if "price_down_revenue_up" in (f.get("divergences") or []):
+        pos.append("Preço cai, receita sobe")
+    if ls.get("binance_alpha"):
+        pos.append("Binance Alpha")
+    if ls.get("binance_perp_without_spot"):
+        pos.append("Perp na Binance")
+    if ls.get("yzi_labs"):
+        pos.append("YZi Labs")
+    if f.get("available") and (f.get("revenue_growth_30d") or 0) >= 10:
+        pos.append(f"Receita {signed(f['revenue_growth_30d'])}")
+    elif f.get("available") and (f.get("fees_growth_30d") or 0) >= 10:
+        pos.append(f"Fees {signed(f['fees_growth_30d'])}")
+    if f.get("available") and (f.get("tvl_change_30d") or 0) >= 10:
+        pos.append(f"TVL {signed(f['tvl_change_30d'])}")
+    if (tk.get("value_capture") or {}).get("available"):
+        pos.append("Receita p/ holders")
+    if tr.get("pullback_in_uptrend"):
+        pos.append("Recuo em alta")
+    if tr.get("ma50_ma200") == "golden_cross_recent":
+        pos.append("Cruz de ouro")
+    if der.get("positioning") == "deleveraged":
+        pos.append("Alavancagem limpa")
+
+    if (d.get("market_regime") or {}).get("status") == "risk_off":
+        neg.append("Mercado em risco")
+    if tr.get("state") in ("DOWNTREND", "CAPITULATION"):
+        neg.append("Tendência de baixa")
+    if tr.get("parabolic"):
+        neg.append("Parabólico")
+    elif tr.get("extended"):
+        neg.append("Esticado")
+    if tk.get("dilution_risk") in ("high", "critical"):
+        neg.append("Diluição alta")
+    if der.get("positioning") == "crowded_long":
+        neg.append("Comprados demais")
+    if (ct.get("top10_holders_pct") or 0) > 50:
+        neg.append(f"Top 10 com {ct['top10_holders_pct']:.0f}%")
+    if d.get("mode") == "pre_listing" and not f.get("available"):
+        neg.append("Sem receita/TVL")
+    if ls.get("dex_only"):
+        neg.append("Só DEX")
+    if ls.get("meme"):
+        neg.append("Memecoin")
+    if "mintable" in (ct.get("warnings") or []):
+        neg.append("Mintável")
+    return pos[:3], neg[:3]
+
+def _where_short(d: dict[str, Any]) -> str:
+    venue = d.get("venue") or {}
+    if venue.get("binance") or venue.get("exchange") == "Binance":
+        return "Binance"
+    parts = list(venue.get("cex") or [])[:2]
+    if venue.get("dex"):
+        parts.append("DEX")
+    return ", ".join(parts) or "fora da Binance"
+
+def _decision_header(result: dict) -> str:
+    vetoes = (result["dossier"].get("vetoes") or [])
+    return {
+        "alert": "🟢 OPORTUNIDADE",
         "watch": "👀 OBSERVAR",
         "reject": "🔴 BLOQUEADO" if vetoes else "⚪ NÃO PASSOU",
     }[result["decision"]]
+
+def compact_message(result: dict, header: str | None = None) -> str:
+    """Decision in 5 seconds: verdict, one-line thesis, reasons for/against, plan. Full report: /detalhe."""
+    d, a = result["dossier"], result.get("ai") or {}
+    asset = d["asset"]
+    symbol = asset["symbol"]
+    header = header or _decision_header(result)
+    lines = [f"{header} · {MODE_LABEL.get(d.get('mode') or 'binance', '')}",
+             f"${symbol} — {asset.get('name') or symbol}"]
+    thesis = a.get("thesis") or ""
+    if thesis and not thesis.startswith("Sem descrição"):
+        lines.append(_short(thesis, 110))
+
+    pos, neg = _chips(d)
+    chips = ([f"✅ {' · '.join(pos)}"] if pos else []) + ([f"⚠️ {' · '.join(neg)}"] if neg else [])
+    if chips:
+        lines += ["", *chips]
+
+    vetoes = d.get("vetoes") or []
+    if vetoes:
+        lines += ["", *[f"🚫 {VETO_LABELS.get(v, v)}" for v in vetoes]]
+    elif a.get("entry_min_usd") is not None and a.get("target_usd") is not None:
+        price = reference_price(d)
+        limit = ""
+        if result["decision"] == "alert" and result.get("position_limit_brl"):
+            limit = f" · Limite {brl(result['position_limit_brl'])}"
+            if (d.get("market_regime") or {}).get("status") == "risk_off":
+                limit += " (reduzido)"
+        conf = f" · Confiança {result['confidence']}%" if result.get("confidence") is not None else ""
+        lines += [
+            "",
+            f"Entrada {money(a['entry_min_usd'])}–{money(a['entry_max_usd'])} · {_where_short(d)}",
+            f"🎯 {money(a['target_usd'])} ({pct_from(price, a['target_usd'])}) · "
+            f"🛑 {money(a['invalidation_usd'])} ({pct_from(price, a['invalidation_usd'])})",
+            f"Risco {RISK_LABEL.get(result['risk'], result['risk'])}{conf}{limit}",
+        ]
+    if result.get("problems"):
+        lines.append("🚫 Níveis da IA descartados")
+    lines += ["", f"Detalhes: /detalhe {symbol}"]
+    return "\n".join(lines)
+
+def opportunity_message(result: dict) -> str:
+    return compact_message(result, "🟢 OPORTUNIDADE")
+
+def manual_analysis_message(result: dict) -> str:
+    return compact_message(result)
+
+def detail_message(result: dict) -> str:
+    """The full research note, on demand (/detalhe)."""
+    d, a = result["dossier"], result.get("ai")
+    vetoes = d.get("vetoes") or []
+    header = _decision_header(result)
     s = d.get("scores") or {}
     footer = [f"🚫 {VETO_LABELS.get(v, v)}" for v in vetoes]
     if result.get("problems"):
@@ -312,6 +431,7 @@ def manual_analysis_message(result: dict) -> str:
     footer.append(score)
     if a:
         footer.append(f"⚠️ Principal risco: {a['main_risk']}")
+    footer.append("Pesquisa, não recomendação.")
     return research_message(result, header, footer)
 
 def tracking_message(opp: dict[str, Any]) -> str:
@@ -394,6 +514,7 @@ async def send_opportunity(context: ContextTypes.DEFAULT_TYPE, result: dict):
 
     msg = opportunity_message(result)
     await send_text(context.bot, msg)
+    STATE["last_results"][symbol] = result
     STATE["alerts_sent"] += 1
     log.info("[alerta] enviado: %s (%s)", symbol, d.get("mode") or "binance")
 
@@ -507,7 +628,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Crypto Radar ativo.\n\n"
         "Comandos:\n"
         "/scan — força uma varredura agora\n"
-        "/analyze BTC — analisa um ativo\n"
+        "/analyze BTC — analisa um ativo (resposta curta)\n"
+        "/detalhe BTC — relatório completo da última análise\n"
         "/status — placar dos sinais e saúde do radar\n"
         "/watch BTC — coloca na lista de observação\n"
         "/unwatch BTC — tira da lista\n"
@@ -624,6 +746,27 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await _run_manual_analysis(update, symbol)
 
+async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    symbol = _symbol_arg(context)
+    if not symbol:
+        await update.effective_message.reply_text("Use: /detalhe PENDLE")
+        return
+    result = STATE["last_results"].get(symbol)
+    if result is None:
+        # Nothing analyzed for it yet in this session: run the analysis once.
+        await update.effective_message.reply_text(f"Analisando {symbol}…")
+        try:
+            result = await asyncio.to_thread(analyze_symbol, symbol)
+        except Exception as exc:
+            log.exception("[detalhe] erro em %s", symbol)
+            await update.effective_message.reply_text(f"Erro analisando {symbol}: {exc}")
+            return
+        if not result:
+            await update.effective_message.reply_text(f"Não encontrei {symbol} entre os ativos monitorados.")
+            return
+        STATE["last_results"][symbol] = result
+    await update.effective_message.reply_text(detail_message(result))
+
 async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = _symbol_arg(context)
     if not symbol:
@@ -663,6 +806,7 @@ async def _run_manual_analysis(update: Update, symbol: str):
                 f"Não encontrei {symbol} entre os {settings.top_coins_to_scan} maiores ativos monitorados."
             )
             return
+        STATE["last_results"][symbol] = result
         await update.effective_message.reply_text(manual_analysis_message(result))
     except Exception as exc:
         log.exception("[analyze] erro em %s", symbol)
@@ -675,6 +819,7 @@ async def _on_startup(app: Application):
         BotCommand("status", "Placar dos sinais e saúde do radar"),
         BotCommand("watch", "Observa um ativo. Ex.: /watch PENDLE"),
         BotCommand("unwatch", "Para de observar um ativo"),
+        BotCommand("detalhe", "Relatório completo da última análise. Ex.: /detalhe PENDLE"),
         BotCommand("id", "Mostra seu chat ID"),
     ])
     if settings.telegram_chat_id:
@@ -706,6 +851,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("status", status, filters=authorized))
     app.add_handler(CommandHandler("watch", watch_cmd, filters=authorized))
     app.add_handler(CommandHandler("unwatch", unwatch_cmd, filters=authorized))
+    app.add_handler(CommandHandler("detalhe", detail_cmd, filters=authorized))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & authorized, natural_chat))
 
     if settings.telegram_chat_id:

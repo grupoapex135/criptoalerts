@@ -20,16 +20,24 @@ Como é o dia a dia com o radar ligado, como ler o placar, quanto ele custa e o 
 
 ## 1. Anatomia do alerta
 
-| Seção | O que traz | De onde vem |
-|---|---|---|
-| **📌 Tese e utilidade** | o que o projeto faz e por que isso tem uso real | IA, escrevendo **só** a partir da descrição e categorias oficiais (CoinGecko/DefiLlama) |
-| **📊 Valuation & saúde** | preço vs. topo histórico, preço em BTC e desconto contra o BTC (200+ dias), FDV ÷ market cap, % em circulação, diluição (unlocks ou oferta real), captura de valor, receita e múltiplo, TVL | CoinGecko, DefiLlama, Tokenomist |
-| **📉 Técnico & ciclo** | tendência (alta/lateral/baixa/capitulação, recuo × esticado × parabólico), MA50 × MA200 (cruz de ouro/morte), RSI diário e semanal, alavancagem | histórico diário, Binance Futures/CoinGlass |
-| **🌍 Contexto macro** | regime do mercado (BTC 7d/30d) e Fear & Greed | CoinGecko, alternative.me |
-| **✅ Por que agora** | o que convergiu nos dados | IA |
-| **🎯 Plano de referência** | zona de entrada, alvo, invalidação, risco, teto por posição e como agir (ex.: entradas fracionadas) | IA + travas do código + seu `.env` |
+```text
+🟢 OPORTUNIDADE · 🚀 PRÉ-BINANCE          ← veredito · modo (🟢 BINANCE = já listada)
+$FLUID — Fluid                             ← ativo
+Lending e DEX na mesma liquidez; …         ← o que o projeto faz (≤ 110 caracteres)
 
-Linhas sem dado somem da mensagem — nunca aparecem como "N/A". O MVRV, por exemplo, só existirá quando houver um provedor on-chain.
+✅ Binance Alpha · Perp na Binance · …     ← até 3 a favor, escolhidos pelo código
+⚠️ Top 10 com 53%                          ← até 3 contra (some se não houver)
+
+Entrada $3.90–$4.05 · Upbit, Bybit, DEX    ← zona de entrada · onde comprar (tier-1 primeiro)
+🎯 $5.20 (+30.0%) · 🛑 $3.40 (-15.0%)       ← alvo e invalidação (stop da tese)
+Risco Médio · Confiança 72% · Limite R$ 600,00
+
+Detalhes: /detalhe FLUID                   ← relatório completo, sem nova chamada à IA
+```
+
+**A favor** pode trazer: preço caindo com receita subindo, Binance Alpha, perpétuo na Binance, YZi Labs, receita/fees/TVL crescendo, receita repassada a holders, recuo dentro de tendência de alta, cruz de ouro, alavancagem limpa. **Contra**: mercado em risco, tendência de baixa, esticado/parabólico, diluição alta, comprados demais, concentração nas 10 maiores carteiras, sem receita/TVL, só DEX, memecoin, contrato mintável.
+
+O **`/detalhe`** traz a nota completa em seções — tese e utilidade, sinais de listagem e contrato, valuation (topo histórico, par BTC, FDV, diluição, receita, TVL), técnico (tendência, MA50×MA200, RSI, alavancagem), contexto macro (regime, Fear & Greed), por que agora e o plano — mais nota, cobertura de dados e principal risco.
 
 ## 2. O /analyze
 
@@ -42,7 +50,7 @@ Um pouco mais de contexto, ainda curto. Quatro respostas possíveis:
 | ⚪ **NÃO PASSOU** | a IA rejeitou ou os níveis eram incoerentes |
 | 🔴 **BLOQUEADO** | veto — a resposta lista os motivos e a IA nem é chamada |
 
-Usa o mesmo formato em seções do alerta e acrescenta a nota final (0–100), a cobertura de dados e a confiança já ajustada. Ativo vetado não chama a IA: sai sem tese nem plano, com os motivos do veto. Funciona para qualquer ativo do top 200, mesmo que não passasse nos filtros do radar.
+Responde no mesmo formato curto do alerta; `/detalhe` mostra o relatório completo com a nota final (0–100), a cobertura de dados e a confiança já ajustada. Ativo vetado não chama a IA: sai sem tese nem plano, com os motivos do veto. Funciona para qualquer ativo do top 200, mesmo que não passasse nos filtros do radar.
 
 ## 3. Placar dos sinais
 

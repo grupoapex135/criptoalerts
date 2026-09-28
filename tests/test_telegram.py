@@ -51,59 +51,63 @@ def result(**over):
 
 
 class TestMessages:
-    def test_alert_is_a_sectioned_research_note(self):
+    def test_alert_is_short_and_decisive(self):
         msg = T.opportunity_message(result())
-        assert msg.startswith("💎 OPORTUNIDADE · 🟢 BINANCE — $LDO (Lido DAO)")
-        assert "🔎 SINAIS DE LISTAGEM" not in msg  # listed asset: no listing section
-        for section in ("📌 TESE E UTILIDADE", "📊 VALUATION & SAÚDE", "📉 TÉCNICO & CICLO",
-                        "🌍 CONTEXTO MACRO", "✅ POR QUE AGORA", "🎯 PLANO DE REFERÊNCIA"):
-            assert section in msg
-        for line in ("Maior protocolo de staking líquido", "• Preço: $1.2 (-74% do topo histórico)",
-                     "• Par BTC: 0.00001440 BTC · -38% da máxima de 221d contra o BTC",
-                     "• FDV / Market cap: 1,21 · 83% em circulação",
-                     "• Diluição: 🟢 baixa — oferta -0.6% em 30d",
-                     "• Captura de valor: receita repassada a holders ($1.2M/30d)",
-                     "• Receita 30d: $3.1M (+27%) · P/receita 10x", "• TVL: $26.3B (+11% em 30d)",
-                     "• Tendência: alta, recuo saudável · +8% da MA50",
-                     "• Médias 50/200d: cruz de ouro recente 🟡", "• RSI: 44 diário · 38 semanal",
-                     "• Alavancagem: 🟢 desalavancado (funding 0.004%, OI -18% em 24h)",
-                     "• Mercado: 🟢 favorável — BTC -2.0% em 7d, +7.8% em 30d",
-                     "• Sentimento: Medo (Fear & Greed 38)", "Entrada: $1.18 – $1.22 · Binance",
-                     "🎯 Alvo: $1.42 (+18.3%)", "🛑 Invalidação: $1.09 (-9.2%)",
-                     "Risco: Médio · Limite: R$ 600,00", "💡 Entradas fracionadas",
-                     "⚠️ Pesquisa, não recomendação."):
-            assert line in msg, line
-        assert len(msg) < 4096  # Telegram limit
+        lines = msg.splitlines()
+        assert lines[0] == "🟢 OPORTUNIDADE · 🟢 BINANCE"
+        assert lines[1] == "$LDO — Lido DAO"
+        assert lines[2].startswith("Maior protocolo de staking líquido")
+        for line in ("✅ Receita +27% · TVL +11% · Receita p/ holders",
+                     "Entrada $1.18–$1.22 · Binance",
+                     "🎯 $1.42 (+18.3%) · 🛑 $1.09 (-9.2%)",
+                     "Risco Médio · Confiança 74% · Limite R$ 600,00",
+                     "Detalhes: /detalhe LDO"):
+            assert line in lines, line
+        assert "⚠️" not in msg                       # nothing against: no risk line
+        assert "📊 VALUATION" not in msg and len(lines) <= 13   # the full report is /detalhe
 
-    def test_missing_data_lines_are_omitted_not_shown_as_na(self):
+    def test_missing_data_never_shows_placeholders(self):
         d = dossier(fundamentals={"available": False}, derivatives={"available": False, "positioning": None},
-                    vs_btc={"available": False}, market_regime={"status": "neutral"},
-                    trend={"state": "NEUTRAL"})
+                    vs_btc={"available": False}, market_regime={"status": "neutral"}, trend={"state": "NEUTRAL"},
+                    tokenomics={})
         msg = T.opportunity_message(result(dossier=d))
-        for absent in ("• Receita", "• TVL", "• Alavancagem", "• Sentimento", "• RSI", "• Médias", "máxima de"):
-            assert absent not in msg, absent
-        assert "N/A" not in msg and "None" not in msg
+        assert "N/A" not in msg and "None" not in msg and "✅" not in msg
 
-    def test_risk_off_alert_shows_reduced_limit(self):
+    def test_long_thesis_is_cut_at_a_word(self):
+        msg = T.opportunity_message(result(ai=ai(thesis="palavra " * 40)))
+        thesis = msg.splitlines()[2]
+        assert thesis.endswith("…") and len(thesis) <= 111 and "palavr…" not in thesis
+
+    def test_risk_off_shows_the_reason_and_the_reduced_limit(self):
         d = dossier(market_regime={"status": "risk_off", "btc_7d": -12.0, "btc_30d": -21.0})
         msg = T.opportunity_message(result(position_limit_brl=300.0, dossier=d))
-        assert "Limite: R$ 300,00 (reduzido: mercado em risco)" in msg
-        assert "• Mercado: 🔴 em risco" in msg
+        assert "Limite R$ 300,00 (reduzido)" in msg
+        assert "⚠️ Mercado em risco" in msg
 
-    def test_manual_analysis_shows_score_and_coverage(self):
+    def test_watch_has_no_position_limit(self):
         msg = T.manual_analysis_message(result(decision="watch"))
-        assert msg.startswith("👀 OBSERVAR · 🟢 BINANCE — $LDO (Lido DAO)")
-        assert "Nota 84/100 · cobertura de dados 100% · confiança 74%" in msg
-        assert "⚠️ Principal risco: Mercado volátil." in msg
+        assert msg.startswith("👀 OBSERVAR · 🟢 BINANCE\n$LDO — Lido DAO")
+        assert "Risco Médio · Confiança 74%" in msg and "Limite" not in msg
 
-    def test_manual_analysis_of_vetoed_asset(self):
+    def test_vetoed_asset_shows_only_the_reasons(self):
         r = result(decision="reject", ai=None, confidence=None,
                    dossier=dossier(vetoes=["critical_unlock", "critical_event"]))
         msg = T.manual_analysis_message(r)
-        assert msg.startswith("🔴 BLOQUEADO · 🟢 BINANCE — $LDO")
-        assert "📌 TESE" not in msg and "🎯 PLANO" not in msg  # no AI call, no thesis or plan
+        assert msg.startswith("🔴 BLOQUEADO · 🟢 BINANCE")
         assert "🚫 Desbloqueio grande de tokens nos próximos 30 dias" in msg
         assert "🚫 Hack ou exploit recente no protocolo" in msg
+        assert "Entrada" not in msg
+
+    def test_detail_is_the_full_research_note(self):
+        msg = T.detail_message(result())
+        assert msg.startswith("🟢 OPORTUNIDADE · 🟢 BINANCE — $LDO (Lido DAO)")
+        for part in ("📌 TESE E UTILIDADE", "📊 VALUATION & SAÚDE", "📉 TÉCNICO & CICLO", "🌍 CONTEXTO MACRO",
+                     "🎯 PLANO DE REFERÊNCIA", "• Receita 30d: $3.1M (+27%) · P/receita 10x",
+                     "• Médias 50/200d: cruz de ouro recente 🟡", "• RSI: 44 diário · 38 semanal",
+                     "• Sentimento: Medo (Fear & Greed 38)", "Entrada: $1.18 – $1.22 · Binance",
+                     "Nota 84/100 · cobertura de dados 100% · confiança 74%", "Pesquisa, não recomendação."):
+            assert part in msg, part
+        assert len(msg) < 4096  # Telegram limit
 
     def test_tracking_messages(self):
         base = {"symbol": "LDO", "price_usd": 1.20, "close_price": 1.42, "result_pct": 18.33, "entered": True}
@@ -147,9 +151,16 @@ class TestPreBinanceMessages:
         d.update(over)
         return result(dossier=d)
 
-    def test_pre_listing_alert_has_label_signals_and_venues(self):
+    def test_pre_listing_alert_is_short_with_signals_and_where(self):
         msg = T.opportunity_message(self.pre())
-        assert msg.startswith("💎 OPORTUNIDADE · 🚀 PRÉ-BINANCE — $FLUID (Fluid)")
+        lines = msg.splitlines()
+        assert lines[0] == "🟢 OPORTUNIDADE · 🚀 PRÉ-BINANCE" and lines[1] == "$FLUID — Fluid"
+        assert "✅ Binance Alpha · Perp na Binance · Receita +27%" in lines
+        assert "⚠️ Top 10 com 62% · Mintável" in lines
+        assert "Entrada $1.18–$1.22 · Upbit, Bybit, DEX" in lines
+
+    def test_pre_listing_detail_lists_every_signal(self):
+        msg = T.detail_message(self.pre())
         for line in ("🔎 SINAIS DE LISTAGEM", "• Binance Alpha Spotlight ✅",
                      "• Perpétuo na Binance Futures, ainda sem spot ✅", "• Programas Binance: HODLer Airdrops",
                      "• Corretoras tier-1: Bybit, Coinbase, Upbit",
@@ -157,21 +168,20 @@ class TestPreBinanceMessages:
                      "Entrada: $1.18 – $1.22 · Upbit, Bybit, Gate · DEX: Uniswap V3"):
             assert line in msg, line
 
-    def test_no_binance_signal_is_said_plainly(self):
+    def test_no_binance_signal_is_said_plainly_in_detail(self):
         d = self.pre()["dossier"]
         d["listing"] = {"available": True, "binance_alpha": False, "binance_perp_without_spot": False,
                         "yzi_labs": False, "binance_programs": [], "tier1_cex": [], "dex_only": True}
-        msg = T.opportunity_message(result(dossier=d))
-        assert "• Nenhum sinal oficial da Binance ainda" in msg
-        assert "• Só negocia em DEX 🟡" in msg
+        msg = T.detail_message(result(dossier=d))
+        assert "• Nenhum sinal oficial da Binance ainda" in msg and "• Só negocia em DEX 🟡" in msg
+        assert "Só DEX" in T.opportunity_message(result(dossier=d))
 
     def test_dangerous_contract_is_spelled_out(self):
         d = self.pre()["dossier"]
         d["contract"] = {"available": True, "status": "danger", "chain": "base", "severe": ["honeypot"], "warnings": []}
-        msg = T.manual_analysis_message(result(decision="reject", ai=None, confidence=None,
-                                               dossier={**d, "vetoes": ["contract_risk"]}))
-        assert "• Contrato (base): 🔴 honeypot (não deixa vender)" in msg
-        assert "🚫 Contrato com risco grave" in msg
+        r = result(decision="reject", ai=None, confidence=None, dossier={**d, "vetoes": ["contract_risk"]})
+        assert "🚫 Contrato com risco grave" in T.manual_analysis_message(r)
+        assert "• Contrato (base): 🔴 honeypot (não deixa vender)" in T.detail_message(r)
 
     def test_listed_event_message(self):
         from datetime import datetime, timezone
@@ -184,6 +194,31 @@ class TestPreBinanceMessages:
               "recent": {"total": 3, "OPEN": 3, "TARGET_HIT": 0, "INVALIDATED": 0, "EXPIRED": 0}, "days": 30,
               "pre_listing": {"total": 2, "listed": 1}}
         assert "🚀 Pré-Binance: 2 sinais · 1 listados na Binance depois do alerta" in "\n".join(T._stats_block(st))
+
+
+class TestDetailCommand:
+    def _update(self):
+        update = mock.MagicMock()
+        update.effective_message.reply_text = mock.AsyncMock()
+        return update
+
+    def test_detail_reuses_the_last_analysis_without_calling_the_ai(self):
+        T.STATE["last_results"]["LDO"] = result()
+        update, ctx = self._update(), mock.MagicMock(args=["ldo"])
+        with mock.patch.object(T, "analyze_symbol") as analyze:
+            asyncio.run(T.detail_cmd(update, ctx))
+        analyze.assert_not_called()
+        assert "📊 VALUATION & SAÚDE" in update.effective_message.reply_text.await_args.args[0]
+
+    def test_detail_runs_the_analysis_once_when_there_is_none(self):
+        T.STATE["last_results"].pop("UNI", None)
+        update, ctx = self._update(), mock.MagicMock(args=["UNI"])
+        uni = result(dossier=dossier(asset={"id": "uniswap", "symbol": "UNI", "name": "Uniswap"}))
+        with mock.patch.object(T, "analyze_symbol", return_value=uni) as analyze:
+            asyncio.run(T.detail_cmd(update, ctx))
+            asyncio.run(T.detail_cmd(update, ctx))
+        assert analyze.call_count == 1
+        assert "$UNI (Uniswap)" in update.effective_message.reply_text.await_args.args[0]
 
 
 class TestAuth:
