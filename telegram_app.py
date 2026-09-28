@@ -15,7 +15,10 @@ from telegram.ext import (
 )
 from config import settings
 from database import Database
-from radar import evaluate_candidates, analyze_symbol, position_limit_brl, reference_price
+from analysis.vetoes import LABELS as VETO_LABELS
+import radar
+import tracker
+from radar import evaluate_candidates, analyze_symbol, reference_price
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +27,13 @@ TZ = ZoneInfo("America/Sao_Paulo")
 # At most one error message per window, so an outage doesn't spam the chat.
 ERROR_NOTICE_INTERVAL = timedelta(hours=3)
 RISK_LABEL = {"baixo": "Baixo", "medio": "Médio", "alto": "Alto"}
+REGIME = {"risk_on": ("🟢", "favorável"), "neutral": ("🟡", "neutro"), "risk_off": ("🔴", "em risco")}
+TREND = {"UPTREND": "alta", "NEUTRAL": "lateral", "DOWNTREND": "baixa", "CAPITULATION": "capitulação"}
+POSITIONING = {
+    "healthy": ("🟢", "saudável"), "deleveraged": ("🟢", "desalavancado"),
+    "crowded_short": ("🟡", "vendidos demais"), "crowded_long": ("🔴", "comprados demais"),
+}
+SYMBOL_RE = re.compile(r"^\$?([A-Za-z0-9]{2,12})$")
 
 # No dashboard: this in-memory state is what /status shows.
 STATE: dict[str, Any] = {
@@ -43,6 +53,7 @@ def _get_scan_lock() -> asyncio.Lock:
         _scan_lock = asyncio.Lock()
     return _scan_lock
 
+# ------------------------------------------------------------------ formatting
 def money(v) -> str:
     try:
         v = float(v)
@@ -63,64 +74,197 @@ def pct_from(price: float, level) -> str:
     except (TypeError, ValueError, ZeroDivisionError):
         return "-"
 
-def reward_risk(a: dict) -> float | None:
-    try:
-        mid = (float(a["entry_min_usd"]) + float(a["entry_max_usd"])) / 2
-        risk = mid - float(a["invalidation_usd"])
-        reward = float(a["target_usd"]) - mid
-    except (KeyError, TypeError, ValueError):
-        return None
-    return reward / risk if risk > 0 and reward > 0 else None
-
 def local_time(dt: datetime | None) -> str:
     return dt.astimezone(TZ).strftime("%d/%m %H:%M") if dt else "-"
 
-def opportunity_message(result: dict) -> str:
-    s = result["snapshot"]
-    a = result["ai"]
-    price = reference_price(s)
-    rr = reward_risk(a)
-    rr_line = f"⚖️ Retorno/risco: {rr:.1f}".replace(".", ",") + "\n" if rr else ""
+def usd_short(v) -> str:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "-"
+    for unit, size in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if abs(v) >= size:
+            return f"${v / size:.1f}{unit}".replace(".0" + unit, unit)
+    return f"${v:.0f}"
 
-    return (
-        f"🟢 OPORTUNIDADE — {s['symbol']}\n\n"
-        f"Entrada: {money(a['entry_min_usd'])} – {money(a['entry_max_usd'])}\n"
-        f"Onde: Binance ({s['binance_spot']['symbol']}) · agora {money(price)}\n"
-        f"Risco: {RISK_LABEL.get(str(a['risk']), str(a['risk']))}\n"
-        f"Limite configurado: {brl(position_limit_brl())}\n\n"
-        f"🎯 Referência: {money(a['target_usd'])} ({pct_from(price, a['target_usd'])})\n"
-        f"🛑 Invalidação: {money(a['invalidation_usd'])} ({pct_from(price, a['invalidation_usd'])})\n"
-        f"{rr_line}\n"
-        f"{a['reason']}\n\n"
-        f"⚠️ {a['warning']}\n"
-        f"Confiança do radar: {int(a['confidence'])}%"
-    )
+def signed(v, decimals: int = 0) -> str:
+    return f"{v:+.{decimals}f}%"
+
+def decimal_br(v: float, decimals: int = 2) -> str:
+    return f"{v:.{decimals}f}".replace(".", ",")
+
+DILUTION = {"low": ("🟢", "baixa"), "medium": ("🟡", "média"), "high": ("🔴", "alta"), "critical": ("🔴", "crítica")}
+CROSS = {
+    "golden_cross_recent": ("🟡", "cruz de ouro recente"),
+    "death_cross_recent": ("🔴", "cruz da morte recente"),
+    "above": ("🟢", "MA50 acima da MA200"),
+    "below": ("🔴", "MA50 abaixo da MA200"),
+}
+
+def _valuation(d: dict[str, Any]) -> list[str]:
+    m, tk = d.get("market") or {}, d.get("tokenomics") or {}
+    f, vb = d.get("fundamentals") or {}, d.get("vs_btc") or {}
+    out = []
+    line = f"• Preço: {money(reference_price(d))}"
+    if m.get("ath_change_pct") is not None:
+        line += f" ({signed(m['ath_change_pct'])} do topo histórico)"
+    out.append(line)
+    if m.get("price_btc"):
+        line = f"• Par BTC: {m['price_btc']:.8f} BTC"
+        if vb.get("available"):
+            line += (f" · na máxima de {vb['days']}d contra o BTC" if vb["from_high_pct"] > -1
+                     else f" · {signed(vb['from_high_pct'])} da máxima de {vb['days']}d contra o BTC")
+        out.append(line)
+    if tk.get("fdv_mcap_ratio"):
+        line = f"• FDV / Market cap: {decimal_br(tk['fdv_mcap_ratio'])}"
+        if tk.get("circulating_pct"):
+            line += f" · {tk['circulating_pct']:.0f}% em circulação"
+        out.append(line)
+    if tk.get("dilution_risk"):
+        icon, label = DILUTION[tk["dilution_risk"]]
+        if tk.get("dilution_basis") == "unlock_schedule":
+            detail = f"unlocks de {decimal_br(tk['unlock_30d_pct'], 1)}% da oferta em 30d"
+        else:
+            detail = f"oferta {signed(tk['supply_growth_30d'], 1)} em 30d"
+        out.append(f"• Diluição: {icon} {label} — {detail}")
+    vc = tk.get("value_capture") or {}
+    if vc.get("available"):
+        out.append(f"• Captura de valor: receita repassada a holders ({usd_short(vc['holders_revenue_30d'])}/30d)")
+    if f.get("available") and f.get("revenue_30d"):
+        line = f"• Receita 30d: {usd_short(f['revenue_30d'])}"
+        if f.get("revenue_growth_30d") is not None:
+            line += f" ({signed(f['revenue_growth_30d'])})"
+        if f.get("market_cap_to_annual_revenue"):
+            line += f" · P/receita {f['market_cap_to_annual_revenue']:.0f}x"
+        out.append(line)
+    if f.get("available") and f.get("tvl"):
+        change = f.get("tvl_change_30d")
+        window = "30d" if change is not None else "7d"
+        change = change if change is not None else f.get("tvl_change_7d")
+        out.append(f"• TVL: {usd_short(f['tvl'])}" + (f" ({signed(change)} em {window})" if change is not None else ""))
+    return out
+
+def _technical(d: dict[str, Any]) -> list[str]:
+    tr, der = d.get("trend") or {}, d.get("derivatives") or {}
+    out = []
+    if tr.get("state"):
+        text = TREND[tr["state"]]
+        if tr.get("parabolic"):
+            text += ", parabólico"
+        elif tr.get("pullback_in_uptrend"):
+            text += ", recuo saudável"
+        elif tr.get("extended"):
+            text += ", esticado"
+        if tr.get("dist_ma50_pct") is not None:
+            text += f" · {signed(tr['dist_ma50_pct'])} da MA50"
+        out.append(f"• Tendência: {text}")
+    if tr.get("ma50_ma200"):
+        icon, label = CROSS[tr["ma50_ma200"]]
+        out.append(f"• Médias 50/200d: {label} {icon}")
+    rsis = [f"{tr[k]:.0f} {name}" for k, name in (("rsi_daily", "diário"), ("rsi_weekly", "semanal"))
+            if tr.get(k) is not None]
+    if rsis:
+        out.append("• RSI: " + " · ".join(rsis))
+    if der.get("positioning"):
+        icon, label = POSITIONING[der["positioning"]]
+        details = []
+        if der.get("funding_rate_pct") is not None:
+            details.append(f"funding {der['funding_rate_pct']:.3f}%")
+        if der.get("oi_change_24h") is not None:
+            details.append(f"OI {signed(der['oi_change_24h'])} em 24h")
+        out.append(f"• Alavancagem: {icon} {label}" + (f" ({', '.join(details)})" if details else ""))
+    return out
+
+def _macro(d: dict[str, Any]) -> list[str]:
+    r = d.get("market_regime") or {}
+    out = []
+    if r.get("status"):
+        icon, name = REGIME[r["status"]]
+        line = f"• Mercado: {icon} {name}"
+        if r.get("btc_7d") is not None and r.get("btc_30d") is not None:
+            line += f" — BTC {signed(r['btc_7d'], 1)} em 7d, {signed(r['btc_30d'], 1)} em 30d"
+        out.append(line)
+    if r.get("fear_greed") is not None:
+        out.append(f"• Sentimento: {r['fear_greed_label']} (Fear & Greed {r['fear_greed']})")
+    return out
+
+def _plan(result: dict) -> list[str]:
+    d, a = result["dossier"], result.get("ai") or {}
+    if a.get("entry_min_usd") is None or a.get("target_usd") is None:
+        return []
+    price = reference_price(d)
+    limit = f"Limite: {brl(result['position_limit_brl'])}"
+    if (d.get("market_regime") or {}).get("status") == "risk_off":
+        limit += " (reduzido: mercado em risco)"
+    out = [
+        f"Entrada: {money(a['entry_min_usd'])} – {money(a['entry_max_usd'])} · {'Binance' if d.get('venue') else 'fora da Binance'}",
+        f"🎯 Alvo: {money(a['target_usd'])} ({pct_from(price, a['target_usd'])}) · "
+        f"🛑 Invalidação: {money(a['invalidation_usd'])} ({pct_from(price, a['invalidation_usd'])})",
+        f"Risco: {RISK_LABEL.get(result['risk'], result['risk'])} · {limit}",
+    ]
+    if a.get("plan"):
+        out.append(f"💡 {a['plan']}")
+    return out
+
+def research_message(result: dict, header: str, footer: list[str] | None = None) -> str:
+    """Sectioned research note: thesis, valuation, technical, macro, plan. Lines without data are omitted."""
+    d, a = result["dossier"], result.get("ai") or {}
+    asset = d["asset"]
+    lines = [f"{header} — ${asset['symbol']} ({asset.get('name') or asset['symbol']})"]
+
+    def section(title: str, body: list[str]):
+        if body:
+            lines.extend(["", title, *body])
+
+    section("📌 TESE E UTILIDADE", [a["thesis"]] if a.get("thesis") else [])
+    section("📊 VALUATION & SAÚDE", _valuation(d))
+    section("📉 TÉCNICO & CICLO", _technical(d))
+    section("🌍 CONTEXTO MACRO", _macro(d))
+    if a.get("short_reason"):
+        section("✅ POR QUE AGORA", [a["short_reason"]])
+    section("🎯 PLANO DE REFERÊNCIA", _plan(result))
+    if footer:
+        lines.extend(["", *footer])
+    return "\n".join(lines)
+
+def opportunity_message(result: dict) -> str:
+    a = result["ai"]
+    return research_message(result, "💎 OPORTUNIDADE", [f"⚠️ Pesquisa, não recomendação. Principal risco: {a['main_risk']}"])
 
 def manual_analysis_message(result: dict) -> str:
-    s = result["snapshot"]
-    a = result["ai"]
-    problems = result.get("problems") or []
-    passed = (
-        bool(a.get("alert"))
-        and int(a.get("confidence", 0)) >= settings.min_confidence_to_alert
-        and not problems
-    )
-    state = "🟢 ALERTA" if passed else "⚪ NÃO PASSOU NO FILTRO"
-    venue = f"Binance ({s['binance_spot']['symbol']})" if s.get("binance_spot") else "não confirmado na Binance"
-    problems_line = f"🚫 Níveis descartados: {'; '.join(problems)}\n" if problems else ""
-    return (
-        f"{state} — {s['symbol']}\n\n"
-        f"Preço: {money(reference_price(s))}\n"
-        f"Entrada ref.: {money(a['entry_min_usd'])} – {money(a['entry_max_usd'])}\n"
-        f"Alvo ref.: {money(a['target_usd'])} · Invalidação: {money(a['invalidation_usd'])}\n"
-        f"Onde: {venue}\n"
-        f"Risco: {RISK_LABEL.get(str(a['risk']), str(a['risk']))}\n"
-        f"Confiança: {int(a['confidence'])}% · Score quant: {s['market_score']:.0f}/100\n"
-        f"{problems_line}\n"
-        f"{a['reason']}\n"
-        f"⚠️ {a['warning']}"
-    )
+    d, a = result["dossier"], result.get("ai")
+    vetoes = d.get("vetoes") or []
+    header = {
+        "alert": "🟢 ALERTA",
+        "watch": "👀 OBSERVAR",
+        "reject": "🔴 BLOQUEADO" if vetoes else "⚪ NÃO PASSOU",
+    }[result["decision"]]
+    s = d.get("scores") or {}
+    footer = [f"🚫 {VETO_LABELS.get(v, v)}" for v in vetoes]
+    if result.get("problems"):
+        footer.append(f"🚫 Níveis descartados: {'; '.join(result['problems'])}")
+    score = f"Nota {s.get('composite', 0):.0f}/100 · cobertura de dados {s.get('data_coverage', 0):.0%}"
+    if result.get("confidence") is not None:
+        score += f" · confiança {result['confidence']}%"
+    footer.append(score)
+    if a:
+        footer.append(f"⚠️ Principal risco: {a['main_risk']}")
+    return research_message(result, header, footer)
 
+def tracking_message(opp: dict[str, Any]) -> str:
+    if opp["status"] == tracker.EXPIRED and not opp.get("entered", True):
+        return f"⌛ {opp['symbol']} expirou sem o preço entrar na zona de entrada"
+    head = {
+        tracker.TARGET_HIT: f"🎯 {opp['symbol']} bateu o alvo",
+        tracker.INVALIDATED: f"🛑 {opp['symbol']} foi invalidado",
+        tracker.EXPIRED: f"⌛ {opp['symbol']} expirou sem alvo nem invalidação",
+    }[opp["status"]]
+    move = f"{money(opp.get('price_usd'))} → {money(opp.get('close_price'))}"
+    if opp.get("result_pct") is not None:
+        move += f" ({opp['result_pct']:+.1f}% desde a entrada)"
+    return f"{head}\n{move}"
+
+# ------------------------------------------------------------------ auth + errors
 def _is_authorized(update: Update) -> bool:
     return bool(settings.telegram_chat_id) and str(update.effective_chat.id) == settings.telegram_chat_id
 
@@ -152,40 +296,54 @@ async def _notify_error(context: ContextTypes.DEFAULT_TYPE, text: str):
     except Exception:
         log.exception("Falha ao avisar erro no Telegram")
 
+# ------------------------------------------------------------------ scan + tracking
 async def send_opportunity(context: ContextTypes.DEFAULT_TYPE, result: dict):
-    s = result["snapshot"]
-    symbol = s["symbol"]
+    d, a = result["dossier"], result["ai"]
+    symbol = d["asset"]["symbol"]
     if await asyncio.to_thread(db.recent_alert_exists, symbol):
         return
-
-    msg = opportunity_message(result)
     chat_id = settings.telegram_chat_id
     if not chat_id:
         return
 
+    msg = opportunity_message(result)
     await context.bot.send_message(chat_id=chat_id, text=msg)
     STATE["alerts_sent"] += 1
 
     row = {
         "symbol": symbol,
-        "name": s.get("name"),
-        "price_usd": reference_price(s),
-        "entry_min_usd": result["ai"].get("entry_min_usd"),
-        "entry_max_usd": result["ai"].get("entry_max_usd"),
-        "target_usd": result["ai"].get("target_usd"),
-        "invalidation_usd": result["ai"].get("invalidation_usd"),
-        "risk": result["ai"].get("risk"),
-        "confidence": result["ai"].get("confidence"),
-        "quantitative_score": s.get("market_score"),
-        "market_cap_usd": s.get("market_cap_usd"),
-        "daily_volume_usd": s.get("daily_volume_usd"),
+        "name": d["asset"].get("name"),
+        "price_usd": reference_price(d),
+        "entry_min_usd": a.get("entry_min_usd"),
+        "entry_max_usd": a.get("entry_max_usd"),
+        "target_usd": a.get("target_usd"),
+        "invalidation_usd": a.get("invalidation_usd"),
+        "risk": result.get("risk"),
+        "confidence": result.get("confidence"),
+        "quantitative_score": d["scores"].get("composite"),
+        "market_cap_usd": d["market"].get("market_cap_usd"),
+        "daily_volume_usd": d["market"].get("daily_volume_usd"),
         "venue": "Binance",
-        "reason": result["ai"].get("reason"),
-        "ai_payload": result["ai"],
-        "raw_snapshot": s,
+        "reason": a.get("short_reason"),
+        "market_regime": (d.get("market_regime") or {}).get("status"),
+        "scores": d.get("scores"),
+        "dossier": d,
+        "ai_payload": a,
     }
     opp_id = await asyncio.to_thread(db.save_opportunity, row)
     await asyncio.to_thread(db.save_alert, opp_id, symbol, chat_id, msg)
+
+async def _run_scan() -> dict:
+    watchlist = await asyncio.to_thread(db.watchlist)
+    in_cooldown = await asyncio.to_thread(db.recent_alert_symbols)
+    return await asyncio.to_thread(evaluate_candidates, in_cooldown.__contains__, watchlist)
+
+async def _deliver(context: ContextTypes.DEFAULT_TYPE, report: dict):
+    for result in report["results"]:
+        try:
+            await send_opportunity(context, result)
+        except Exception:
+            log.exception("[scanner] falha ao enviar %s", result["dossier"]["asset"]["symbol"])
 
 async def scanner_job(context: ContextTypes.DEFAULT_TYPE):
     lock = _get_scan_lock()
@@ -194,7 +352,7 @@ async def scanner_job(context: ContextTypes.DEFAULT_TYPE):
         return
     async with lock:
         try:
-            report = await asyncio.to_thread(evaluate_candidates, db.recent_alert_exists)
+            report = await _run_scan()
         except Exception as exc:
             log.exception("[scanner] erro")
             _record_scan(None, exc)
@@ -202,11 +360,7 @@ async def scanner_job(context: ContextTypes.DEFAULT_TYPE):
             return
         _record_scan(report, None)
 
-    for result in report["results"]:
-        try:
-            await send_opportunity(context, result)
-        except Exception:
-            log.exception("[scanner] falha ao enviar %s", result["snapshot"]["symbol"])
+    await _deliver(context, report)
     if report["errors"]:
         await _notify_error(
             context,
@@ -214,137 +368,212 @@ async def scanner_job(context: ContextTypes.DEFAULT_TYPE):
             + "\n".join(report["errors"][:3]),
         )
 
+async def tracker_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        changed = await asyncio.to_thread(tracker.check_open, db, radar.binance)
+    except Exception:
+        log.exception("[tracker] erro")
+        return
+    for opp in changed:
+        try:
+            await context.bot.send_message(chat_id=settings.telegram_chat_id, text=tracking_message(opp))
+        except Exception:
+            log.exception("[tracker] falha ao avisar %s", opp.get("symbol"))
+
+def scan_summary(report: dict) -> str:
+    regime = REGIME.get((report.get("regime") or {}).get("status"), ("⚪", "sem dados"))
+    lines = [
+        "🔎 Varredura concluída", "",
+        f"Mercado: {regime[0]} {regime[1]}",
+        f"{report['universe']} ativos → {report['deep']} a fundo → {report['candidates']} na IA",
+        f"✅ {len(report['results'])} alerta(s)",
+    ]
+    if report["watch"]:
+        lines.append(f"👀 Em observação: {', '.join(report['watch'])}")
+    if report["vetoed"]:
+        lines.append(f"🚫 Bloqueados: {len(report['vetoed'])}")
+    if report["rejected"]:
+        lines.append("Descartados por níveis incoerentes: " + ", ".join(r.split(":")[0] for r in report["rejected"]))
+    if report["errors"]:
+        lines += ["", "⚠️ Erros da IA:", *report["errors"][:3]]
+    return "\n".join(lines)
+
+# ------------------------------------------------------------------ commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         if not settings.telegram_chat_id:
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 f"Modo configuração.\n\nSeu chat ID é: {update.effective_chat.id}\n"
                 "Coloque em TELEGRAM_CHAT_ID no .env e reinicie o bot."
             )
         else:
-            await update.message.reply_text("Bot privado.")
+            await update.effective_message.reply_text("Bot privado.")
         return
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "Crypto Radar ativo.\n\n"
         "Comandos:\n"
         "/scan — força uma varredura agora\n"
         "/analyze BTC — analisa um ativo\n"
-        "/status — saúde do radar e última varredura\n"
+        "/status — placar dos sinais e saúde do radar\n"
+        "/watch BTC — coloca na lista de observação\n"
+        "/unwatch BTC — tira da lista\n"
         "/id — mostra seu chat ID\n\n"
         "Você também pode escrever: “analisa PENDLE”.\n\n"
+        "Nos alertas: 🟢 bom · 🟡 neutro · 🔴 ruim · ⚪ sem dados.\n"
         f"Varredura automática a cada {settings.scan_interval_minutes} min."
     )
 
 async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Seu TELEGRAM_CHAT_ID é: {update.effective_chat.id}")
+    await update.effective_message.reply_text(f"Seu TELEGRAM_CHAT_ID é: {update.effective_chat.id}")
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lock = _get_scan_lock()
     if lock.locked():
-        await update.message.reply_text("⏳ Já tem uma varredura rodando. Tente de novo em instantes.")
+        await update.effective_message.reply_text("⏳ Já tem uma varredura rodando. Tente de novo em instantes.")
         return
     async with lock:
-        await update.message.reply_text("🔎 Rodando o radar agora…")
+        await update.effective_message.reply_text("🔎 Rodando o radar agora… (leva alguns minutos)")
         try:
-            report = await asyncio.to_thread(evaluate_candidates)
+            report = await _run_scan()
         except Exception as exc:
             log.exception("[scan] erro")
             _record_scan(None, exc)
-            await update.message.reply_text(f"Erro no scan: {exc}")
+            await update.effective_message.reply_text(f"Erro no scan: {exc}")
             return
         _record_scan(report, None)
+    # Same path as the automatic scan: alerts are persisted, tracked and respect cooldown.
+    await _deliver(context, report)
+    await update.effective_message.reply_text(scan_summary(report))
 
-    results = report["results"]
-    for result in results[:3]:
-        await update.message.reply_text(opportunity_message(result))
+def _stats_block(st: dict[str, Any]) -> list[str]:
+    a, r = st["all"], st["recent"]
+    if not a["total"]:
+        return ["📊 RADAR", "", "Nenhum sinal ainda."]
+    lines = [
+        "📊 RADAR", "",
+        f"Sinais: {a['total']}",
+        f"Alvo atingido: {a['TARGET_HIT']}",
+        f"Invalidado: {a['INVALIDATED']}",
+        f"Expirado: {a['EXPIRED']}",
+        f"Em aberto: {a['OPEN']}", "",
+        f"Win rate encerrados: {a['win_rate']}%" if a["win_rate"] is not None else "Win rate: sem sinais encerrados",
+        "",
+        f"Últimos {st['days']}d:",
+        f"{r['total']} sinais · {r['TARGET_HIT']} alvo · {r['INVALIDATED']} invalidados · "
+        f"{r['OPEN']} abertos" + (f" · {r['EXPIRED']} expirados" if r["EXPIRED"] else ""),
+    ]
+    return lines
 
-    summary = (
-        f"{report['candidates']} candidato(s) avaliado(s) pela IA · {len(results)} passaram."
-        if results else
-        f"Nenhuma oportunidade passou nos critérios neste momento "
-        f"({report['candidates']} candidato(s) avaliado(s) pela IA)."
-    )
-    if report["rejected"]:
-        summary += "\n\n🚫 Descartados por níveis incoerentes:\n" + "\n".join(report["rejected"][:5])
-    if report["errors"]:
-        summary += "\n\n⚠️ Erros da IA:\n" + "\n".join(report["errors"][:3])
-    await update.message.reply_text(summary)
+def _sources_line() -> str:
+    def mark(on: bool) -> str:
+        return "✅" if on else "⚪"
+    parts = [
+        "DefiLlama ✅",
+        f"Derivativos {mark(settings.enable_derivatives)}"
+        + (" (CoinGlass)" if radar.coinglass.enabled else " (Binance)" if settings.enable_derivatives else ""),
+        f"Unlocks {mark(settings.enable_tokenomics and radar.tokenomist.enabled)}",
+        f"Social {mark(settings.enable_social and radar.lunarcrush.enabled)}",
+        f"Notícias {mark(settings.enable_news and radar.news.enabled)}",
+        f"Hacks {mark(settings.enable_news)}",
+        f"On-chain {mark('onchain' in radar.enabled_layers())}",
+    ]
+    return " · ".join(parts)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(timezone.utc)
-    last_at = STATE["last_scan_at"]
-    report = STATE["last_report"]
+    rows = await asyncio.to_thread(db.signal_rows)
+    lines = _stats_block(tracker.stats(rows))
 
+    now = datetime.now(timezone.utc)
+    last_at, report = STATE["last_scan_at"], STATE["last_report"]
+    lines += ["", "🩺 Saúde"]
+    if report and report.get("regime"):
+        regime = report["regime"]
+        icon, name = REGIME.get(regime.get("status"), ("⚪", "sem dados"))
+        lines.append(f"Mercado: {icon} {name} — {regime.get('reason', '')}")
     if not last_at:
-        last_line = "Última varredura: ainda não rodou"
+        lines.append("Última varredura: ainda não rodou")
     elif STATE["last_scan_error"]:
-        last_line = f"Última varredura: {local_time(last_at)} — ❌ falhou: {STATE['last_scan_error'][:300]}"
+        lines.append(f"Última varredura: {local_time(last_at)} — ❌ falhou: {STATE['last_scan_error'][:300]}")
     else:
         mins = int((now - last_at).total_seconds() // 60)
-        last_line = (
-            f"Última varredura: {local_time(last_at)} (há {mins} min)\n"
-            f"  → {report['candidates']} na IA · {len(report['results'])} passaram · "
-            f"{len(report['rejected'])} descartados · {len(report['errors'])} erros"
+        lines.append(
+            f"Última varredura: {local_time(last_at)} (há {mins} min) → "
+            f"{report['candidates']} na IA · {len(report['results'])} alerta(s) · "
+            f"{len(report['watch'])} observação · {len(report['errors'])} erros"
         )
-
     jobs = context.job_queue.get_jobs_by_name("market_scanner") if context.job_queue else []
-    next_line = f"Próxima automática: {local_time(jobs[0].next_t)}" if jobs else "Varredura automática: desligada"
-
+    lines.append(f"Próxima: {local_time(jobs[0].next_t)}" if jobs else "Varredura automática: desligada")
+    lines.append(f"Fontes: {_sources_line()}")
     if db.enabled:
-        supa = "ligado" + (f" (último erro: {db.last_error[:200]})" if db.last_error else "")
+        lines.append("Supabase: ligado" + (f" (último erro: {db.last_error[:150]})" if db.last_error else ""))
     else:
-        supa = "desligado (cooldown só em memória)"
+        lines.append("Supabase: desligado — placar e cooldown só em memória")
+    await update.effective_message.reply_text("\n".join(lines))
 
-    await update.message.reply_text(
-        "📡 Crypto Radar — status\n\n"
-        f"Rodando desde: {local_time(STATE['started_at'])}\n"
-        f"{last_line}\n"
-        f"{next_line}\n"
-        f"Alertas enviados desde o início: {STATE['alerts_sent']}\n\n"
-        f"Modelo IA: {settings.openai_model}\n"
-        f"Supabase: {supa}\n"
-        f"Filtros: mcap ≥ ${settings.min_market_cap_usd / 1e6:,.0f}M · "
-        f"volume ≥ ${settings.min_daily_volume_usd / 1e6:,.0f}M · "
-        f"FDV/MC ≤ {settings.max_fdv_to_mcap_ratio:g} · score ≥ {settings.min_score_to_ai:g} · "
-        f"confiança ≥ {settings.min_confidence_to_alert} · cooldown {settings.alert_cooldown_hours}h"
-    )
+def _symbol_arg(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    if not context.args:
+        return None
+    m = SYMBOL_RE.match(context.args[0])
+    return m.group(1).upper() if m else None
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Use: /analyze PENDLE")
+    symbol = _symbol_arg(context)
+    if not symbol:
+        await update.effective_message.reply_text("Use: /analyze PENDLE")
         return
-    symbol = context.args[0].lstrip("$").upper()
     await _run_manual_analysis(update, symbol)
 
+async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    symbol = _symbol_arg(context)
+    if not symbol:
+        current = await asyncio.to_thread(db.watchlist)
+        await update.effective_message.reply_text(
+            "👀 Em observação: " + (", ".join(current) if current else "nenhum") +
+            "\n\nUse /watch PENDLE para adicionar. Ativos observados sempre recebem análise completa na varredura."
+        )
+        return
+    await asyncio.to_thread(db.watch, symbol, True)
+    await update.effective_message.reply_text(f"👀 {symbol} na lista de observação. Ele entra na análise completa de toda varredura.")
+
+async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    symbol = _symbol_arg(context)
+    if not symbol:
+        await update.effective_message.reply_text("Use: /unwatch PENDLE")
+        return
+    await asyncio.to_thread(db.watch, symbol, False)
+    await update.effective_message.reply_text(f"{symbol} saiu da lista de observação.")
+
 async def natural_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip()
+    text = (update.effective_message.text or "").strip()
     m = re.search(r"\b(?:analisa|analisar|analyze|olha|ver)\s+\$?([A-Za-z0-9]{2,12})\b", text, re.I)
     if m:
         await _run_manual_analysis(update, m.group(1).upper())
         return
-    await update.message.reply_text(
-        "Para o MVP, eu respondo análises de ativos. Ex.: “analisa PENDLE” ou use /scan."
+    await update.effective_message.reply_text(
+        "Eu respondo análises de ativos. Ex.: “analisa PENDLE”, ou use /scan e /status."
     )
 
 async def _run_manual_analysis(update: Update, symbol: str):
-    await update.message.reply_text(f"Analisando {symbol}…")
+    await update.effective_message.reply_text(f"Analisando {symbol}…")
     try:
         result = await asyncio.to_thread(analyze_symbol, symbol)
         if not result:
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 f"Não encontrei {symbol} entre os {settings.top_coins_to_scan} maiores ativos monitorados."
             )
             return
-        await update.message.reply_text(manual_analysis_message(result))
+        await update.effective_message.reply_text(manual_analysis_message(result))
     except Exception as exc:
         log.exception("[analyze] erro em %s", symbol)
-        await update.message.reply_text(f"Erro analisando {symbol}: {exc}")
+        await update.effective_message.reply_text(f"Erro analisando {symbol}: {exc}")
 
 async def _on_startup(app: Application):
     await app.bot.set_my_commands([
         BotCommand("scan", "Força uma varredura agora"),
         BotCommand("analyze", "Analisa um ativo. Ex.: /analyze PENDLE"),
-        BotCommand("status", "Saúde do radar e última varredura"),
+        BotCommand("status", "Placar dos sinais e saúde do radar"),
+        BotCommand("watch", "Observa um ativo. Ex.: /watch PENDLE"),
+        BotCommand("unwatch", "Para de observar um ativo"),
         BotCommand("id", "Mostra seu chat ID"),
     ])
     if settings.telegram_chat_id:
@@ -358,7 +587,8 @@ def build_app() -> Application:
     if not settings.telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN não configurado.")
 
-    authorized = _authorized_filter()
+    # Edited messages are ignored: re-running an analysis on every edit is noise.
+    authorized = _authorized_filter() & filters.UpdateType.MESSAGE
     app = (
         Application.builder()
         .token(settings.telegram_bot_token)
@@ -372,6 +602,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("scan", scan, filters=authorized))
     app.add_handler(CommandHandler("analyze", analyze_cmd, filters=authorized))
     app.add_handler(CommandHandler("status", status, filters=authorized))
+    app.add_handler(CommandHandler("watch", watch_cmd, filters=authorized))
+    app.add_handler(CommandHandler("unwatch", unwatch_cmd, filters=authorized))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & authorized, natural_chat))
 
     if settings.telegram_chat_id:
@@ -380,6 +612,12 @@ def build_app() -> Application:
             interval=settings.scan_interval_minutes * 60,
             first=15,
             name="market_scanner",
+        )
+        app.job_queue.run_repeating(
+            tracker_job,
+            interval=settings.tracker_interval_minutes * 60,
+            first=60,
+            name="signal_tracker",
         )
     else:
         log.warning("TELEGRAM_CHAT_ID vazio: varredura automática desligada. Mande /id ao bot.")

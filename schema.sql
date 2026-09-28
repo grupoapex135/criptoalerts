@@ -1,5 +1,10 @@
+-- Crypto Radar schema. Idempotent and additive: safe to run again on an
+-- existing database (it only creates what is missing; it never drops or
+-- rewrites data). Run the whole file in the Supabase SQL Editor.
+
 create extension if not exists pgcrypto;
 
+-- ------------------------------------------------------------------ v1
 create table if not exists opportunities (
     id uuid primary key default gen_random_uuid(),
     symbol text not null,
@@ -36,7 +41,36 @@ create table if not exists alerts (
 create index if not exists alerts_symbol_sent_idx
 on alerts(symbol, sent_at desc);
 
+-- ------------------------------------------------------------------ v2: multi-layer + tracking
+-- Outcome tracking. Rows created before v2 start as OPEN and get tracked too.
+alter table opportunities add column if not exists status text not null default 'OPEN';
+alter table opportunities add column if not exists expires_at timestamptz;
+alter table opportunities add column if not exists closed_at timestamptz;
+alter table opportunities add column if not exists close_price numeric;
+alter table opportunities add column if not exists result_pct numeric;
+-- Analysis context: subscores, the full dossier the AI read, and the market regime.
+alter table opportunities add column if not exists scores jsonb;
+alter table opportunities add column if not exists dossier jsonb;
+alter table opportunities add column if not exists market_regime text;
+
+do $$
+begin
+    if not exists (select 1 from pg_constraint where conname = 'opportunities_status_check') then
+        alter table opportunities add constraint opportunities_status_check
+            check (status in ('OPEN', 'TARGET_HIT', 'INVALIDATED', 'EXPIRED'));
+    end if;
+end $$;
+
+create index if not exists opportunities_status_idx on opportunities(status);
+
+create table if not exists watchlist (
+    symbol text primary key,
+    created_at timestamptz not null default now(),
+    active boolean not null default true
+);
+
 -- RLS on with no policies: only the service role (the bot) can read/write.
 -- Without this, the public anon key could read and write these tables via the REST API.
 alter table opportunities enable row level security;
 alter table alerts enable row level security;
+alter table watchlist enable row level security;

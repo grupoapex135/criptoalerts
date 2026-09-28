@@ -3,113 +3,152 @@
 
 # 🛰️ 03 — Operação e deploy
 
-Como é o dia a dia com o radar ligado, quanto ele custa e o que considerar para deixá-lo rodando 24/7.
+Como é o dia a dia com o radar ligado, como ler o placar, quanto ele custa e o que considerar para deixá-lo rodando 24/7.
 
 ## Índice
 
 1. [Anatomia do alerta](#1-anatomia-do-alerta)
-2. [Lendo o /status](#2-lendo-o-status)
-3. [Quando o bot fala sozinho](#3-quando-o-bot-fala-sozinho)
-4. [Cooldown e histórico](#4-cooldown-e-histórico)
-5. [Custos](#5-custos)
-6. [Rodando 24/7](#6-rodando-247)
+2. [O /analyze](#2-o-analyze)
+3. [Placar dos sinais](#3-placar-dos-sinais)
+4. [Lendo o /status](#4-lendo-o-status)
+5. [Watchlist](#5-watchlist)
+6. [Quando o bot fala sozinho](#6-quando-o-bot-fala-sozinho)
+7. [Custos](#7-custos)
+8. [Rodando 24/7](#8-rodando-247)
 
 ---
 
 ## 1. Anatomia do alerta
 
+| Seção | O que traz | De onde vem |
+|---|---|---|
+| **📌 Tese e utilidade** | o que o projeto faz e por que isso tem uso real | IA, escrevendo **só** a partir da descrição e categorias oficiais (CoinGecko/DefiLlama) |
+| **📊 Valuation & saúde** | preço vs. topo histórico, preço em BTC e desconto contra o BTC (200+ dias), FDV ÷ market cap, % em circulação, diluição (unlocks ou oferta real), captura de valor, receita e múltiplo, TVL | CoinGecko, DefiLlama, Tokenomist |
+| **📉 Técnico & ciclo** | tendência (alta/lateral/baixa/capitulação, recuo × esticado × parabólico), MA50 × MA200 (cruz de ouro/morte), RSI diário e semanal, alavancagem | histórico diário, Binance Futures/CoinGlass |
+| **🌍 Contexto macro** | regime do mercado (BTC 7d/30d) e Fear & Greed | CoinGecko, alternative.me |
+| **✅ Por que agora** | o que convergiu nos dados | IA |
+| **🎯 Plano de referência** | zona de entrada, alvo, invalidação, risco, teto por posição e como agir (ex.: entradas fracionadas) | IA + travas do código + seu `.env` |
+
+Linhas sem dado somem da mensagem — nunca aparecem como "N/A". O MVRV, por exemplo, só existirá quando houver um provedor on-chain.
+
+## 2. O /analyze
+
+Um pouco mais de contexto, ainda curto. Quatro respostas possíveis:
+
+| Cabeçalho | Significado |
+|---|---|
+| 🟢 **ALERTA** | passaria no radar agora |
+| 👀 **OBSERVAR** | interessante, mas ainda não (confiança ou nota abaixo da régua, ou a IA pediu observação) |
+| ⚪ **NÃO PASSOU** | a IA rejeitou ou os níveis eram incoerentes |
+| 🔴 **BLOQUEADO** | veto — a resposta lista os motivos e a IA nem é chamada |
+
+Usa o mesmo formato em seções do alerta e acrescenta a nota final (0–100), a cobertura de dados e a confiança já ajustada. Ativo vetado não chama a IA: sai sem tese nem plano, com os motivos do veto. Funciona para qualquer ativo do top 200, mesmo que não passasse nos filtros do radar.
+
+## 3. Placar dos sinais
+
+Cada alerta vira um **sinal** salvo com preço no alerta, entrada, alvo, invalidação, confiança, subnotas e o dossiê completo que a IA leu.
+
+A cada `TRACKER_INTERVAL_MINUTES` (30), o radar lê as velas de 1h da Binance desde o alerta:
+
+| Estado | Quando |
+|---|---|
+| `OPEN` | nenhum nível tocado ainda |
+| `TARGET_HIT` | a máxima de uma vela tocou o alvo |
+| `INVALIDATED` | a mínima de uma vela tocou a invalidação |
+| `EXPIRED` | passou `OPPORTUNITY_EXPIRY_DAYS` (14) sem tocar nenhum |
+
+Regras que mantêm o placar honesto:
+
+- **Vale o primeiro nível tocado**, em ordem cronológica.
+- **Vela que toca os dois níveis conta como invalidada** — dentro de 1h não dá para saber a ordem, e o placar nunca é inflado.
+- **Expirado não é vitória nem derrota**: aparece separado e fica fora do win rate.
+- O resultado é medido a partir do **preço no alerta**.
+
+Cada mudança de estado é avisada no chat:
+
 ```text
-🟢 OPORTUNIDADE — PENDLE                     ← ativo que passou em tudo
-
-Entrada: $2.55 – $2.65                       ← zona de referência sugerida pela IA
-Onde: Binance (PENDLEUSDT) · agora $2.6      ← par confirmado + preço no momento
-Risco: Médio                                 ← classificação da IA
-Limite configurado: R$ 600,00                ← CAPITAL_BRL × MAX_POSITION_PCT (seu teto)
-
-🎯 Referência: $3.1 (+19.2%)                 ← alvo e distância do preço atual
-🛑 Invalidação: $2.35 (-9.6%)                ← onde a tese deixa de valer
-⚖️ Retorno/risco: 2,0                        ← (alvo − meio da entrada) ÷ (meio da entrada − invalidação)
-
-Pullback de 7d com TVL crescendo...          ← justificativa da IA
-⚠️ Zonas de referência, não garantias.       ← ressalva da IA
-Confiança do radar: 72%                      ← sempre ≥ MIN_CONFIDENCE_TO_ALERT
+🎯 LDO bateu o alvo
+$1.2 → $1.42 (+18.3%)
 ```
 
-> [!TIP]
-> O **retorno/risco** é o número mais útil para decidir. Abaixo de 1,5, o alvo paga pouco pelo risco até a invalidação — mesmo com confiança alta.
-
-## 2. Lendo o /status
+## 4. Lendo o /status
 
 ```text
-📡 Crypto Radar — status
+📊 RADAR
 
-Rodando desde: 28/09 09:57
-Última varredura: 28/09 10:57 (há 12 min)
-  → 5 na IA · 1 passaram · 0 descartados · 0 erros
-Próxima automática: 28/09 11:57
-Alertas enviados desde o início: 3
+Sinais: 24
+Alvo atingido: 13
+Invalidado: 6
+Expirado: 0
+Em aberto: 5
 
-Modelo IA: gpt-5
-Supabase: desligado (cooldown só em memória)
-Filtros: mcap ≥ $100M · volume ≥ $5M · FDV/MC ≤ 3 · score ≥ 55 · confiança ≥ 65 · cooldown 24h
+Win rate encerrados: 68%
+
+Últimos 30d:
+9 sinais · 6 alvo · 2 invalidados · 1 abertos
+
+🩺 Saúde
+Mercado: 🟢 favorável — BTC -2.0% em 7d e +7.8% em 30d, acima da média de 50 dias.
+Última varredura: 28/09 10:57 (há 12 min) → 5 na IA · 1 alerta(s) · 2 observação · 0 erros
+Próxima: 28/09 11:57
+Fontes: DefiLlama ✅ · Derivativos ✅ (Binance) · Unlocks ⚪ · Social ⚪ · Notícias ⚪ · Hacks ✅ · On-chain ⚪
+Supabase: ligado
 ```
 
 | Linha | Como ler |
 |---|---|
-| **N na IA** | Quantos candidatos chegaram à IA. Zero várias vezes seguidas = filtros apertados demais para o mercado atual |
-| **passaram** | Viraram alerta (ou vão virar, se não estiverem em cooldown) |
-| **descartados** | A IA quis alertar, mas os níveis eram incoerentes — o código barrou |
-| **erros** | A IA falhou (chave, crédito, timeout). Se aparecer, rode `python smoke_test.py --ai` |
-| **❌ falhou** | A varredura inteira caiu — o motivo aparece na própria linha |
+| **Win rate** | alvo ÷ (alvo + invalidado). Com poucos sinais encerrados, é ruído — espere algumas dezenas |
+| **N na IA** | zero várias vezes seguidas = mercado sem candidatos ou régua alta (ex.: `risk_off`) |
+| **observação** | a IA ou as travas seguraram — use `/analyze` para ver por quê |
+| **erros** | a IA falhou (chave, crédito, timeout) — rode `python smoke_test.py --ai` |
+| **Fontes ⚪** | sem chave ou camada desligada — esperado se você não usa aquele provedor |
 
-Os horários são de Brasília.
+Horários em Brasília.
 
-## 3. Quando o bot fala sozinho
+## 5. Watchlist
+
+`/watch PENDLE` garante que o ativo passe pela análise completa (histórico, dados profundos) em toda varredura, mesmo fora do corte dos melhores. Ele ainda precisa passar nos filtros e nos vetos para virar alerta. `/watch` sem nada lista; `/unwatch PENDLE` tira. Com Supabase, a lista sobrevive a reinícios.
+
+## 6. Quando o bot fala sozinho
 
 | Mensagem | Quando |
 |---|---|
-| 🟢 **Crypto Radar iniciado** | Toda vez que o processo sobe. Se ela aparecer sem você ter reiniciado nada, o servidor reiniciou o bot |
-| 🟢 **OPORTUNIDADE** | Um ativo passou em todas as camadas |
-| ⚠️ **Crypto Radar com problema** | Varredura falhou ou a IA errou. **No máximo uma vez a cada 3 horas**, para uma API fora do ar não virar spam |
+| 🟢 **Crypto Radar iniciado** | toda vez que o processo sobe — se aparecer sem você reiniciar, o servidor reiniciou o bot |
+| 🟢 **OPORTUNIDADE** | um ativo passou em todas as camadas |
+| 🎯 / 🛑 / ⌛ | um sinal bateu o alvo, foi invalidado ou expirou |
+| ⚠️ **Crypto Radar com problema** | varredura falhou ou a IA errou — no máximo uma vez a cada 3 horas |
 
-Silêncio por horas é normal: significa que nada passou nos filtros. Para ter certeza de que o radar está vivo, mande `/status`.
+Silêncio por horas é normal: significa que nada convergiu. Para ter certeza de que está vivo, `/status`.
 
-## 4. Cooldown e histórico
+## 7. Custos
 
-Depois de alertar um ativo, o radar o ignora por `ALERT_COOLDOWN_HOURS` (24h) — e isso é conferido **antes** da IA, então não há custo com ativos repetidos.
-
-| | Sem Supabase | Com Supabase |
+| Item | Consumo aproximado (varredura a cada 60 min) | Custo |
 |---|---|---|
-| Cooldown | Em memória — **zera ao reiniciar** | Persistente |
-| Histórico de alertas | Não há | Tabelas `opportunities` e `alerts` |
-| Se o Supabase cair | — | O radar segue funcionando com o cooldown em memória e mostra o erro no `/status` |
-
-O `/scan` manual mostra oportunidades mesmo que estejam em cooldown — ele é uma consulta, não um alerta.
-
-## 5. Custos
-
-| Item | Consumo | Custo |
-|---|---|---|
-| CoinGecko | 1 chamada por varredura + 1 por `/analyze` (~720/mês no padrão) | Grátis (Demo: 10 mil/mês) |
-| DefiLlama, Binance, Telegram | Dados públicos | Grátis |
-| Supabase | Poucas linhas por dia | Grátis |
-| **OpenAI** | Até `MAX_AI_CANDIDATES` análises por varredura + 1 por `/analyze` | **Pago** — o único custo real |
+| **OpenAI** | até `MAX_AI_CANDIDATES` análises por varredura + 1 por `/analyze` | **pago** — o principal custo |
+| CoinGecko | 2 a 3 mil chamadas/mês | grátis no plano Demo (10 mil/mês) |
+| DefiLlama, Binance Spot/Futures, Telegram | dados públicos, em cache | grátis |
+| Supabase | poucas linhas por dia | grátis |
+| Tokenomist | ~1 chamada por finalista a cada 12h | plano Pro ou acima |
+| CoinGlass | 4 chamadas por finalista a cada 5 min de cache | Hobbyist ou acima |
+| LunarCrush | 1 lista + 1 série por finalista a cada 15 min de cache | Individual ou acima |
+| NewsData | 1 chamada para até 5 finalistas a cada 2h | grátis (200 créditos/dia) |
 
 Para cortar custo da IA, na ordem de impacto:
 
 1. **Aumentar `SCAN_INTERVAL_MINUTES`** — de 60 para 120 corta pela metade.
 2. **Baixar `MAX_AI_CANDIDATES`** — de 5 para 3.
-3. **Subir `MIN_SCORE_TO_AI`** — menos candidatos chegam à IA.
+3. **Subir `MIN_SCORE_TO_AI`** — menos ativos chegam à IA.
 
-## 6. Rodando 24/7
+## 8. Rodando 24/7
 
-O radar só varre enquanto o processo `python main.py` estiver vivo. No computador pessoal, ele para quando o terminal fecha ou a máquina dorme. Para rodar sem parar, ele precisa de um servidor.
+O radar só varre e acompanha sinais enquanto o processo `python main.py` estiver vivo. No computador pessoal, ele para quando o terminal fecha ou a máquina dorme.
 
 **O que o servidor precisa ter:**
 
 - Python 3.10+ e acesso de saída à internet — o bot usa *polling*, então **não precisa de porta aberta, domínio nem HTTPS**.
 - O `.env` configurado direto no servidor (ou as variáveis no painel do provedor). Nunca no repositório.
 - Reinício automático se o processo cair.
+- **Supabase configurado** — sem ele, placar e watchlist zeram a cada reinício do servidor.
 
 **Opções que funcionam para esse perfil de app** (processo contínuo, sem site):
 
@@ -120,7 +159,7 @@ O radar só varre enquanto o processo `python main.py` estiver vivo. No computad
 
 > [!IMPORTANT]
 > **Duas regras que derrubam o bot se ignoradas:**
-> 1. **Região fora dos EUA.** A Binance bloqueia acesso a partir dos EUA (HTTP 451). Prefira São Paulo ou Europa.
+> 1. **Região fora dos EUA.** A Binance bloqueia acesso a partir dos EUA (HTTP 451), no spot e nos futuros. Prefira São Paulo ou Europa.
 > 2. **Uma instância por token.** Se o bot estiver rodando no servidor e no seu computador ao mesmo tempo, o Telegram derruba um deles com erro `Conflict`.
 
 <div align="right"><a href="#topo">▲ voltar ao topo</a> · <a href="../README.md">Voltar ao README →</a></div>

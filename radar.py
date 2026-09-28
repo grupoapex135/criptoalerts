@@ -1,93 +1,277 @@
+"""
+Scanner pipeline. Expensive work only happens for survivors of cheaper stages:
+
+  top N coins ─ prefilter + Binance pair ─▶ stage 1 (bulk data, no per-coin calls)
+             ─ top TREND_CANDIDATES ─────▶ stage 2 (90d history: trend, supply growth)
+             ─ top DEEP_CANDIDATES ──────▶ stage 3 (unlocks, derivatives, social, news, TVL 30d)
+             ─ no vetoes, score ok ──────▶ AI (top MAX_AI_CANDIDATES) ─▶ code checks ─▶ alert
+"""
 from __future__ import annotations
 import logging
-from typing import Any, Callable
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone, timedelta
+from typing import Any, Callable, Iterable
+
 from config import settings
-from providers import CoinGeckoClient, DefiLlamaClient, BinanceClient
-from scoring import score_market_candidate, enrich_with_defi
+from analysis import params as P
+from analysis.catalysts import build_catalysts
+from analysis.derivatives import build_derivatives
+from analysis.filters import prefilter
+from analysis.fundamentals import build_fundamentals
+from analysis.market_regime import build_market_regime
+from analysis.onchain import build_onchain
+from analysis.scoring import compute_scores, coverage_penalty, risk_label
+from analysis.social import build_social
+from analysis.tokenomics import build_tokenomics, supply_growth_30d
+from analysis.trend import btc_relative, compute_trend
+from analysis.vetoes import compute_vetoes
 from ai_analyzer import analyze
+from providers import BinanceClient, CoinGeckoClient, DefiLlamaClient
+from providers.base import cache, pct_change, safe_call, to_float
+from providers.binance_futures import BinanceFuturesClient
+from providers.coinglass import CoinGlassClient
+from providers.lunarcrush import LunarCrushClient
+from providers.news import NewsClient
+from providers.onchain import get_onchain_provider
+from providers.sentiment import fear_greed
+from providers.tokenomist import TokenomistClient
 
 log = logging.getLogger(__name__)
 
 cg = CoinGeckoClient()
 llama = DefiLlamaClient()
 binance = BinanceClient()
+futures = BinanceFuturesClient()
+coinglass = CoinGlassClient()
+tokenomist = TokenomistClient()
+lunarcrush = LunarCrushClient()
+news = NewsClient()
 
-# Same ticker on CoinGecko and Binance can be different assets
-# (e.g. CoinGecko "AI" vs Binance AIUSDT). Above this gap we treat it as a mismatch.
-MAX_VENUE_PRICE_GAP_PCT = 5.0
-# Code-level guard for "keep entry zone near current price".
-MAX_ENTRY_DISTANCE_PCT = 10.0
+RISK_ORDER = {"baixo": 0, "medio": 1, "alto": 2}
+
 
 def _num(v, default=0.0):
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return default
+    f = to_float(v)
+    return default if f is None else f
 
-def _opt(v) -> float | None:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
 
-def position_limit_brl() -> float:
-    return round(settings.capital_brl * (settings.max_position_pct / 100.0), 2)
+def position_limit_brl(factor: float = 1.0) -> float:
+    return round(settings.capital_brl * (settings.max_position_pct / 100.0) * factor, 2)
 
+
+def enabled_layers() -> set[str]:
+    """Layers that have a configured source; the rest don't lower data coverage."""
+    layers = {"market_quality", "trend_quality", "fundamentals", "tokenomics"}
+    if settings.enable_derivatives:
+        layers.add("derivatives")
+    if settings.enable_social and lunarcrush.enabled:
+        layers.add("social")
+    if settings.enable_onchain and get_onchain_provider():
+        layers.add("onchain")
+    return layers
+
+
+# ------------------------------------------------------------------ market data
 def _range_7d(coin: dict[str, Any]) -> tuple[float | None, float | None]:
     prices = [p for p in ((coin.get("sparkline_in_7d") or {}).get("price") or []) if p is not None]
     if not prices:
         return None, None
     return min(prices), max(prices)
 
-def build_snapshot(coin: dict[str, Any], score: float, reasons: list[str],
-                   defi: dict[str, Any] | None, venue: dict[str, Any] | None) -> dict[str, Any]:
+
+def market_snapshot(coin: dict[str, Any]) -> dict[str, Any]:
     mcap = _num(coin.get("market_cap"))
     fdv = _num(coin.get("fully_diluted_valuation"))
     low_7d, high_7d = _range_7d(coin)
     return {
-        "id": coin.get("id"),
-        "symbol": str(coin.get("symbol") or "").upper(),
-        "name": coin.get("name"),
         "current_price_usd": _num(coin.get("current_price")),
         "market_cap_usd": mcap,
         "daily_volume_usd": _num(coin.get("total_volume")),
         "fdv_usd": fdv or None,
         "fdv_to_market_cap": round(fdv / mcap, 3) if fdv and mcap else None,
-        "price_change_1h_pct": _opt(coin.get("price_change_percentage_1h_in_currency")),
-        "price_change_24h_pct": _opt(coin.get("price_change_percentage_24h_in_currency")),
-        "price_change_7d_pct": _opt(coin.get("price_change_percentage_7d_in_currency")),
-        "price_change_30d_pct": _opt(coin.get("price_change_percentage_30d_in_currency")),
-        "high_24h_usd": _opt(coin.get("high_24h")),
-        "low_24h_usd": _opt(coin.get("low_24h")),
+        "price_change_1h_pct": to_float(coin.get("price_change_percentage_1h_in_currency")),
+        "price_change_24h_pct": to_float(coin.get("price_change_percentage_24h_in_currency")),
+        "price_change_7d_pct": to_float(coin.get("price_change_percentage_7d_in_currency")),
+        "price_change_30d_pct": to_float(coin.get("price_change_percentage_30d_in_currency")),
+        "high_24h_usd": to_float(coin.get("high_24h")),
+        "low_24h_usd": to_float(coin.get("low_24h")),
         "range_7d_low_usd": low_7d,
         "range_7d_high_usd": high_7d,
-        "ath_change_pct": _opt(coin.get("ath_change_percentage")),
-        "market_score": round(score, 1),
-        "quant_reasons": reasons,
-        "defillama_protocol_context": defi,
-        "binance_spot": venue,
-        "position_limit_brl": position_limit_brl(),
+        "ath_change_pct": to_float(coin.get("ath_change_percentage")),
     }
 
-def reference_price(snapshot: dict[str, Any]) -> float:
-    venue = snapshot.get("binance_spot") or {}
-    return _num(venue.get("last_price")) or _num(snapshot.get("current_price_usd"))
 
-def binance_venue(symbol: str, coingecko_price: float) -> dict[str, Any] | None:
+def get_market_regime(coins: list[dict[str, Any]]) -> dict[str, Any]:
+    def build():
+        btc = next((c for c in coins if c.get("id") == "bitcoin"), None)
+        eth = next((c for c in coins if c.get("id") == "ethereum"), None)
+        global_data = safe_call("CoinGecko global", cg.global_data)
+        history = safe_call("Histórico BTC", lambda: cg.daily_history("bitcoin")) or {}
+        sentiment = safe_call("Fear & Greed", fear_greed)
+        return build_market_regime(btc, eth, global_data, history.get("prices"), sentiment)
+    return cache.get_or_set("regime", P.CACHE_TTL["market_regime"], build)
+
+
+def load_bulk() -> dict[str, Any]:
+    """DefiLlama datasets covering every protocol at once: one call each, cached."""
+    return {
+        "protocols": safe_call("DefiLlama protocols", llama.protocols, []),
+        "chains": safe_call("DefiLlama chains", llama.chains, []),
+        "overviews": {k: safe_call(f"DefiLlama {k}", lambda k=k: llama.overview(k), [])
+                      for k in llama.OVERVIEWS},
+    }
+
+
+def binance_venue(symbol: str, coingecko_price: float, ticker: dict[str, Any] | None = None) -> dict[str, Any] | None:
     pair = binance.spot_pair(symbol)
     if not pair:
         return None
-    venue = binance.ticker(pair)
+    venue = ticker if ticker is not None else binance.ticker(pair)
     if not venue:
         return None
     if coingecko_price > 0:
         gap = abs(venue["last_price"] - coingecko_price) / coingecko_price * 100
-        if gap > MAX_VENUE_PRICE_GAP_PCT:
-            log.info("%s: Binance %s diverge %.1f%% do CoinGecko; ativo diferente, ignorado.",
-                     symbol, pair, gap)
+        if gap > P.MAX_VENUE_PRICE_GAP_PCT:
+            # Same ticker on CoinGecko and Binance can be different assets.
+            log.info("%s: Binance %s diverge %.1f%% do CoinGecko; ativo diferente, ignorado.", symbol, pair, gap)
             return None
     return venue
 
+
+# ------------------------------------------------------------------ dossier
+class Candidate:
+    """One asset moving through the funnel: provider context + the dossier the AI will read."""
+
+    def __init__(self, coin: dict[str, Any], bulk: dict[str, Any], regime: dict[str, Any]):
+        self.coin = coin
+        self.id = str(coin.get("id") or "")
+        self.symbol = str(coin.get("symbol") or "").upper()
+        self.market = market_snapshot(coin)
+        btc_price, btc_30d = regime.get("btc_price"), regime.get("btc_30d")
+        p30 = self.market["price_change_30d_pct"]
+        self.market["price_btc"] = round(self.market["current_price_usd"] / btc_price, 10) if btc_price else None
+        self.market["vs_btc_30d_pct"] = (round(((1 + p30 / 100) / (1 + btc_30d / 100) - 1) * 100, 2)
+                                         if p30 is not None and btc_30d is not None else None)
+        protocols, chains = bulk["protocols"], bulk["chains"]
+        self.ctx = llama.protocol_context(self.id, self.symbol, protocols) if protocols else None
+        if self.ctx is None and chains:
+            self.ctx = llama.chain_context(self.id, chains)
+        self.flows = ({k: llama.flow_metrics(self.ctx, entries) for k, entries in bulk["overviews"].items()}
+                      if self.ctx else {})
+        self.history: dict[str, list[float]] = {}
+        self.btc_history: dict[str, list[float]] = {}
+        self.tvl_change_30d: float | None = None
+        self.unlocks: dict[str, Any] | None = None
+        self.venue: dict[str, Any] | None = None
+        self.dossier: dict[str, Any] = {
+            "asset": {"id": self.id, "symbol": self.symbol, "name": self.coin.get("name")},
+            "market_regime": {k: v for k, v in regime.items() if k != "adjustments"},
+            "market": self.market,
+            "venue": None,
+            "derivatives": {"available": False, "positioning": None},
+            "onchain": {"available": False, "state": None},
+            "social": {"available": False, "state": None},
+            "catalysts": {"available": False, "positive": [], "negative": [], "critical_risk": False},
+        }
+        self.rebuild()
+
+    @property
+    def price(self) -> float:
+        return self.market["current_price_usd"]
+
+    def rebuild(self):
+        m = self.market
+        p24, p7, p30 = m["price_change_24h_pct"], m["price_change_7d_pct"], m["price_change_30d_pct"]
+        prices, caps = self.history.get("prices"), self.history.get("market_caps")
+        holders = (self.flows.get("holders_revenue") or {}).get("total_30d")
+        self.dossier["trend"] = compute_trend(prices, self.price, p24, p7, p30)
+        self.dossier["vs_btc"] = btc_relative(prices, self.btc_history.get("prices"))
+        self.dossier["fundamentals"] = build_fundamentals(self.ctx, self.flows, self.tvl_change_30d,
+                                                          m["market_cap_usd"], p30)
+        self.dossier["tokenomics"] = build_tokenomics(self.coin, supply_growth_30d(caps, prices),
+                                                      self.unlocks, holders)
+        self.dossier["venue"] = ({"exchange": "Binance", "pair": self.venue["symbol"],
+                                  "last_price": self.venue["last_price"]} if self.venue else None)
+        self.dossier["scores"] = compute_scores(self.dossier, enabled_layers())
+        self.dossier["vetoes"] = compute_vetoes(self.dossier)
+
+    @property
+    def composite(self) -> float:
+        return self.dossier["scores"]["composite"]
+
+
+def reference_price(dossier: dict[str, Any]) -> float:
+    venue = dossier.get("venue") or {}
+    return _num(venue.get("last_price")) or _num((dossier.get("market") or {}).get("current_price_usd"))
+
+
+# ------------------------------------------------------------------ stages
+def add_profile(c: Candidate):
+    """Official description + categories, only for assets about to be read by the AI."""
+    profile = safe_call(f"Perfil {c.symbol}", lambda: cg.coin_profile(c.id)) or {}
+    c.dossier["asset"]["description"] = profile.get("description") or (c.ctx or {}).get("description")
+    c.dossier["asset"]["categories"] = profile.get("categories") or []
+
+
+def add_history(c: Candidate):
+    c.history = safe_call(f"Histórico {c.symbol}", lambda: cg.daily_history(c.id)) or {}
+    # Same cached series the market regime already fetched: no extra call.
+    c.btc_history = safe_call("Histórico BTC", lambda: cg.daily_history("bitcoin")) or {}
+    c.rebuild()
+
+
+def add_deep_data(c: Candidate, hacks: list[dict[str, Any]], headlines: dict[str, list] | None):
+    m = c.market
+    if settings.enable_tokenomics and tokenomist.enabled:
+        c.unlocks = safe_call(f"Tokenomist {c.symbol}",
+                              lambda: tokenomist.unlocks(c.id, c.symbol, to_float(c.coin.get("circulating_supply"))))
+
+    if c.ctx:
+        series = safe_call(f"TVL histórico {c.symbol}", lambda: llama.tvl_series(c.ctx["kind"], c.ctx["slug"])) or []
+        c.tvl_change_30d = pct_change(series[-1], series[-31]) if len(series) > 30 else None
+
+    if settings.enable_derivatives:
+        raw = safe_call(f"CoinGlass {c.symbol}", lambda: coinglass.derivatives(c.symbol)) if coinglass.enabled else None
+        if raw is None:
+            raw = safe_call(f"Binance Futures {c.symbol}", lambda: futures.derivatives(c.symbol))
+        c.dossier["derivatives"] = build_derivatives(raw, m["price_change_24h_pct"], m["price_change_7d_pct"])
+
+    if settings.enable_social and lunarcrush.enabled:
+        raw = safe_call(f"LunarCrush {c.symbol}", lambda: lunarcrush.social(c.symbol, m["market_cap_usd"]))
+        c.dossier["social"] = build_social(raw)
+
+    provider = get_onchain_provider() if settings.enable_onchain else None
+    if provider:
+        c.dossier["onchain"] = build_onchain(safe_call(f"On-chain {c.symbol}", lambda: provider.metrics(c.symbol)))
+
+    if settings.enable_news:
+        since = (datetime.now(timezone.utc) - timedelta(days=P.CATALYST_LOOKBACK_DAYS)).timestamp()
+        sources = ["defillama_hacks"] + (["newsdata"] if headlines is not None else [])
+        c.dossier["catalysts"] = build_catalysts(
+            llama.recent_hacks(c.ctx, str(c.coin.get("name") or c.symbol), since, hacks),
+            (headlines or {}).get(c.symbol), sources)
+
+    c.rebuild()
+
+
+def run_deep_stage(cands: list[Candidate]):
+    if not cands:
+        return
+    hacks = safe_call("DefiLlama hacks", llama.hacks, []) if settings.enable_news else []
+    headlines = None
+    if settings.enable_news and news.enabled:
+        headlines = safe_call("Notícias", lambda: news.headlines([c.symbol for c in cands]))
+    with ThreadPoolExecutor(max_workers=P.DEEP_WORKERS) as pool:
+        list(pool.map(lambda c: add_deep_data(c, hacks, headlines), cands))
+
+
+def _pick(ranked: list[Candidate], n: int, watchlist: set[str]) -> list[Candidate]:
+    top = ranked[:n]
+    extra = [c for c in ranked[n:] if c.symbol in watchlist]
+    return top + extra
+
+
+# ------------------------------------------------------------------ AI + guard
 def check_levels(ai: dict[str, Any], price: float) -> list[str]:
     """Returns the problems found in the AI price levels (empty = coherent)."""
     try:
@@ -100,109 +284,152 @@ def check_levels(ai: dict[str, Any], price: float) -> list[str]:
     problems = []
     if not (0 < inval < emin <= emax < target):
         problems.append("níveis incoerentes (exige invalidação < entrada mín ≤ entrada máx < alvo)")
+    if price > 0 and not (inval < price < target):
+        # A target below the current price would be "hit" on the first candle.
+        problems.append("alvo precisa estar acima e invalidação abaixo do preço atual")
     if price > 0:
-        low = price * (1 - MAX_ENTRY_DISTANCE_PCT / 100)
-        high = price * (1 + MAX_ENTRY_DISTANCE_PCT / 100)
+        low = price * (1 - P.MAX_ENTRY_DISTANCE_PCT / 100)
+        high = price * (1 + P.MAX_ENTRY_DISTANCE_PCT / 100)
         if emin < low or emax > high:
-            problems.append(f"zona de entrada a mais de {MAX_ENTRY_DISTANCE_PCT:.0f}% do preço atual")
+            problems.append(f"zona de entrada a mais de {P.MAX_ENTRY_DISTANCE_PCT:.0f}% do preço atual")
     return problems
 
-def scan_candidates(skip_symbol: Callable[[str], bool] | None = None) -> list[dict[str, Any]]:
-    coins = cg.markets(settings.top_coins_to_scan)
 
-    try:
-        protocols = llama.protocols()
-    except Exception as exc:
-        # TVL is optional enrichment; the radar keeps working without it.
-        log.warning("DefiLlama indisponível: %s", exc)
-        protocols = []
+def ai_dossier(dossier: dict[str, Any]) -> dict[str, Any]:
+    """What the AI reads: every layer, without bulky or internal fields."""
+    d = dict(dossier)
+    d["trend"] = {k: v for k, v in (d.get("trend") or {}).items() if k not in ("ma20", "ma50", "ma200")}
+    return d
 
-    ranked = []
-    for coin in coins:
-        base_score, reasons = score_market_candidate(coin)
-        if base_score <= 0:
-            continue
 
-        symbol = str(coin.get("symbol") or "").upper()
-        defi = llama.protocol_context(str(coin.get("id") or ""), symbol, protocols) if protocols else None
-        score, defi_reasons = enrich_with_defi(base_score, defi)
-        if score >= settings.min_score_to_ai:
-            ranked.append((score, coin, reasons + defi_reasons, defi))
+def decide(dossier: dict[str, Any], ai: dict[str, Any], regime: dict[str, Any]) -> dict[str, Any]:
+    """Combines the AI's call with the code's own gates into the final decision."""
+    scores = dossier["scores"]
+    adj = regime.get("adjustments") or P.REGIME_ADJUSTMENTS["neutral"]
+    confidence = max(0, int(ai.get("confidence") or 0) - coverage_penalty(scores))
+    code_risk = risk_label(scores["risk"])
+    ai_risk = ai.get("risk") if ai.get("risk") in RISK_ORDER else "alto"
+    risk = max(ai_risk, code_risk, key=RISK_ORDER.get)
+    problems: list[str] = []
 
-    # Best scores first; network checks only until the AI slots are filled.
-    ranked.sort(key=lambda r: r[0], reverse=True)
-    candidates = []
-    for score, coin, reasons, defi in ranked:
-        if len(candidates) >= settings.max_ai_candidates:
-            break
-        symbol = str(coin.get("symbol") or "").upper()
-        # Checked before the AI call so cooldown symbols don't burn tokens
-        # or take the slots of fresh candidates.
-        if skip_symbol and skip_symbol(symbol):
-            continue
-
-        venue = binance_venue(symbol, _num(coin.get("current_price")))
-        if not venue:
-            # MVP only alerts assets actually available on Binance spot.
-            continue
-
-        candidates.append(build_snapshot(coin, score, reasons, defi, venue))
-
-    return candidates
-
-def evaluate_candidates(skip_symbol: Callable[[str], bool] | None = None) -> dict[str, Any]:
-    """
-    Runs one radar pass. Returns a report so callers can tell apart
-    "nothing passed" from "the AI failed":
-    {"candidates": int, "results": [...], "errors": [str], "rejected": [str]}
-    """
-    candidates = scan_candidates(skip_symbol)
-    results: list[dict[str, Any]] = []
-    errors: list[str] = []
-    rejected: list[str] = []
-
-    for snapshot in candidates:
-        symbol = snapshot["symbol"]
-        try:
-            ai = analyze(snapshot)
-        except Exception as exc:
-            log.exception("IA falhou para %s", symbol)
-            errors.append(f"{symbol}: {exc}")
-            continue
-
-        if not ai.get("alert"):
-            continue
-        if int(ai.get("confidence", 0)) < settings.min_confidence_to_alert:
-            continue
-        problems = check_levels(ai, reference_price(snapshot))
+    decision = ai.get("decision")
+    if dossier.get("vetoes"):
+        decision = "reject"
+    elif decision == "alert":
+        problems = check_levels(ai, reference_price(dossier))
         if problems:
-            log.warning("%s descartado: %s | %s", symbol, "; ".join(problems), ai)
-            rejected.append(f"{symbol}: {'; '.join(problems)}")
+            decision = "reject"
+        elif confidence < adj["min_confidence"] or scores["composite"] < adj["min_score"]:
+            decision = "watch"
+    elif decision not in ("watch", "reject"):
+        decision = "reject"
+
+    return {
+        "decision": decision,
+        "confidence": confidence,
+        "risk": risk,
+        "problems": problems,
+        "position_limit_brl": position_limit_brl(adj["position_factor"]),
+    }
+
+
+# ------------------------------------------------------------------ entry points
+def scan_candidates(skip_symbol: Callable[[str], bool] | None = None,
+                    watchlist: Iterable[str] = ()) -> tuple[dict[str, Any], list[Candidate], dict[str, Any]]:
+    """Runs the funnel up to (not including) the AI. Returns regime, finalists and funnel stats."""
+    watch = {s.upper() for s in watchlist}
+    coins = cg.markets(settings.top_coins_to_scan)
+    regime = get_market_regime(coins)
+    bulk = load_bulk()
+
+    universe = []
+    for coin in coins:
+        if prefilter(coin):
             continue
+        if not binance.spot_pair(str(coin.get("symbol") or "")):
+            continue  # MVP only alerts assets on Binance spot
+        universe.append(Candidate(coin, bulk, regime))
+    universe.sort(key=lambda c: c.composite, reverse=True)
 
-        results.append({"snapshot": snapshot, "ai": ai})
+    # Cooldown before any per-coin call: repeated symbols cost nothing.
+    fresh = [c for c in universe if not (skip_symbol and skip_symbol(c.symbol))]
+    stage2 = _pick(fresh, P.TREND_CANDIDATES, watch)
 
-    return {"candidates": len(candidates), "results": results, "errors": errors, "rejected": rejected}
+    tickers = binance.tickers([f"{c.symbol}USDT" for c in stage2])
+    confirmed = []
+    for c in stage2:
+        c.venue = binance_venue(c.symbol, c.price, tickers.get(f"{c.symbol}USDT"))
+        if c.venue:
+            add_history(c)
+            confirmed.append(c)
+    confirmed.sort(key=lambda c: c.composite, reverse=True)
+
+    stage3 = _pick([c for c in confirmed if not c.dossier["vetoes"]], P.DEEP_CANDIDATES, watch)
+    run_deep_stage(stage3)
+
+    vetoed = [c for c in confirmed if c.dossier["vetoes"]]
+    min_score = regime["adjustments"]["min_score"]
+    finalists = sorted((c for c in stage3 if not c.dossier["vetoes"] and c.composite >= min_score
+                        and c.dossier["scores"]["data_coverage"] >= P.MIN_DATA_COVERAGE_FOR_AI),
+                       key=lambda c: c.composite, reverse=True)[: settings.max_ai_candidates]
+    stats = {
+        "universe": len(universe),
+        "deep": len(stage3),
+        "vetoed": [f"{c.symbol}: {', '.join(c.dossier['vetoes'])}" for c in vetoed][:8],
+    }
+    return regime, finalists, stats
+
+
+def evaluate_candidates(skip_symbol: Callable[[str], bool] | None = None,
+                        watchlist: Iterable[str] = ()) -> dict[str, Any]:
+    """
+    One radar pass. The report tells apart "nothing passed" from "the AI failed":
+    {"regime", "universe", "deep", "candidates", "results", "watch", "vetoed", "rejected", "errors"}
+    """
+    regime, finalists, stats = scan_candidates(skip_symbol, watchlist)
+    results, watch, rejected, errors = [], [], [], []
+
+    for c in finalists:
+        add_profile(c)
+        try:
+            ai = analyze(ai_dossier(c.dossier))
+        except Exception as exc:
+            log.exception("IA falhou para %s", c.symbol)
+            errors.append(f"{c.symbol}: {exc}")
+            continue
+        final = decide(c.dossier, ai, regime)
+        if final["decision"] == "alert":
+            results.append({"dossier": c.dossier, "ai": ai, **final})
+        elif final["decision"] == "watch":
+            watch.append(c.symbol)
+        elif final["problems"]:
+            log.warning("%s descartado: %s | %s", c.symbol, "; ".join(final["problems"]), ai)
+            rejected.append(f"{c.symbol}: {'; '.join(final['problems'])}")
+
+    return {"regime": regime, **stats, "candidates": len(finalists), "results": results,
+            "watch": watch, "rejected": rejected, "errors": errors}
+
 
 def analyze_symbol(query_symbol: str) -> dict[str, Any] | None:
+    """Full dossier for one asset, even if it would not pass the scanner's filters."""
     symbol = query_symbol.strip().upper()
     coins = cg.markets(settings.top_coins_to_scan)
     coin = next((c for c in coins if str(c.get("symbol") or "").upper() == symbol), None)
     if not coin:
         return None
 
-    try:
-        defi = llama.protocol_context(str(coin.get("id") or ""), symbol, llama.protocols())
-    except Exception as exc:
-        log.warning("DefiLlama indisponível: %s", exc)
-        defi = None
+    regime = get_market_regime(coins)
+    c = Candidate(coin, load_bulk(), regime)
+    c.venue = binance_venue(symbol, c.price)
+    add_history(c)
+    run_deep_stage([c])
 
-    score, reasons = score_market_candidate(coin)
-    score, extra = enrich_with_defi(score, defi)
-    reasons += extra
+    if c.dossier["vetoes"]:
+        # A hard veto is final: no need to pay for an AI opinion.
+        return {"dossier": c.dossier, "ai": None, "decision": "reject", "confidence": None,
+                "risk": risk_label(c.dossier["scores"]["risk"]), "problems": [],
+                "position_limit_brl": position_limit_brl(regime["adjustments"]["position_factor"])}
 
-    venue = binance_venue(symbol, _num(coin.get("current_price")))
-    snapshot = build_snapshot(coin, score, reasons, defi, venue)
-    ai = analyze(snapshot)
-    problems = check_levels(ai, reference_price(snapshot))
-    return {"snapshot": snapshot, "ai": ai, "problems": problems}
+    add_profile(c)
+    ai = analyze(ai_dossier(c.dossier))
+    return {"dossier": c.dossier, "ai": ai, **decide(c.dossier, ai, regime)}
