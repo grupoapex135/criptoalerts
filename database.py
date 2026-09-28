@@ -8,7 +8,8 @@ from config import settings
 
 log = logging.getLogger(__name__)
 
-TRACK_FIELDS = "id,symbol,detected_at,price_usd,entry_min_usd,entry_max_usd,target_usd,invalidation_usd,expires_at,status"
+TRACK_FIELDS = ("id,symbol,coin_id,mode,detected_at,price_usd,entry_min_usd,entry_max_usd,target_usd,"
+                "invalidation_usd,expires_at,status,binance_listed_at")
 
 
 def parse_ts(value) -> datetime | None:
@@ -122,12 +123,24 @@ class Database:
                 res = self.client.table("opportunities").select(TRACK_FIELDS).eq("status", "OPEN").execute()
                 for r in res.data or []:
                     # Closed in this process but the DB update failed: don't close (and notify) twice.
-                    if self._opps.get(r["id"], {}).get("status", "OPEN") == "OPEN":
-                        rows[r["id"]] = r
+                    local = self._opps.get(r["id"], {})
+                    if local.get("status", "OPEN") == "OPEN":
+                        rows[r["id"]] = {**r, "binance_listed_at": local.get("binance_listed_at") or r.get("binance_listed_at")}
             except Exception as exc:
                 self._fail("tracking", exc)
-        return [{**r, "detected_at": parse_ts(r.get("detected_at")), "expires_at": parse_ts(r.get("expires_at"))}
+        return [{**r, "detected_at": parse_ts(r.get("detected_at")), "expires_at": parse_ts(r.get("expires_at")),
+                 "binance_listed_at": parse_ts(r.get("binance_listed_at"))}
                 for r in rows.values()]
+
+    def mark_listed(self, opp_id: str):
+        """A pre-Binance signal whose asset got listed on Binance spot (notified once)."""
+        now = datetime.now(timezone.utc)
+        self._opps.setdefault(opp_id, {"id": opp_id})["binance_listed_at"] = now
+        if self.enabled and not opp_id.startswith("mem-"):
+            try:
+                self.client.table("opportunities").update({"binance_listed_at": now.isoformat()}).eq("id", opp_id).execute()
+            except Exception as exc:
+                self._fail("tracking", exc)
 
     def close_opportunity(self, opp_id: str, status: str, close_price: float, result_pct: float):
         now = datetime.now(timezone.utc)
@@ -145,12 +158,14 @@ class Database:
 
     def signal_rows(self) -> list[dict[str, Any]]:
         """status + detected_at of every tracked signal, for /status."""
-        rows = {k: {"status": v.get("status"), "detected_at": v.get("detected_at")} for k, v in self._opps.items()}
+        fields = ("status", "detected_at", "mode", "binance_listed_at")
+        rows = {k: {f: v.get(f) for f in fields} for k, v in self._opps.items()}
         if self.enabled:
             try:
-                res = self.client.table("opportunities").select("id,status,detected_at").limit(10000).execute()
+                res = self.client.table("opportunities").select("id," + ",".join(fields)).limit(10000).execute()
                 for r in res.data or []:
-                    rows[r["id"]] = {"status": r.get("status"), "detected_at": parse_ts(r.get("detected_at"))}
+                    rows[r["id"]] = {"status": r.get("status"), "detected_at": parse_ts(r.get("detected_at")),
+                                     "mode": r.get("mode"), "binance_listed_at": parse_ts(r.get("binance_listed_at"))}
             except Exception as exc:
                 self._fail("stats", exc)
         return list(rows.values())

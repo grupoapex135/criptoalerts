@@ -10,25 +10,22 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from config import settings
 from analysis.params import CACHE_TTL, MIN_INTERVAL_S
-from providers.base import RateLimiter, ProviderError, cache, http_get_json, to_float
+from providers.base import KeyedProvider, RateLimiter, ProviderError, cache, http_get_json, to_float
 
 BASE = "https://api.tokenomist.ai"
 _limiter = RateLimiter(MIN_INTERVAL_S["tokenomist"])
 
 
-class TokenomistClient:
-    source = "tokenomist"
+class TokenomistClient(KeyedProvider):
+    source = name = "tokenomist"
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key if api_key is not None else settings.tokenomist_api_key
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.api_key)
+        self.blocked = None
 
     def _get(self, path: str, params: dict | None = None) -> Any:
         _limiter.wait()
-        payload = http_get_json(f"{BASE}{path}", params=params, headers={"x-api-key": self.api_key})
+        payload = self.guard(lambda: http_get_json(f"{BASE}{path}", params=params, headers={"x-api-key": self.api_key}))
         if not payload.get("status", True):
             raise ProviderError(f"tokenomist {path}: {payload.get('errorMessage')}")
         return payload.get("data")

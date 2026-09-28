@@ -81,7 +81,7 @@ O CoinGecko responde mesmo sem chave, mas o limite público é baixo e costuma d
 COINGECKO_API_KEY=CG-...
 ```
 
-Por varredura: 1 chamada de mercado, 1 de dados globais e o histórico de 90 dias dos ~15 melhores ativos — que fica 6h em cache, então o mesmo ativo custa no máximo 4 chamadas por dia. No intervalo padrão, a estimativa é de 2 a 3 mil chamadas por mês, abaixo das 10 mil do plano Demo.
+Por varredura: 4 páginas de mercado (top 1000), 1 de dados globais, o histórico dos ~15 melhores de cada modo (12h em cache) e os perfis dos finalistas (24h em cache). Com o placar Pré-Binance, a estimativa é de ~7 mil chamadas por mês no intervalo padrão, abaixo das 10 mil do plano Demo — **com a chave**. Sem chave, o limite público não aguenta os dois modos.
 
 ## 6. Supabase (opcional)
 
@@ -115,10 +115,12 @@ Nenhum é obrigatório. Sem chave, cada camada usa a fonte grátis ou fica sem d
 |---|---|---|---|
 | `TOKENOMIST_API_KEY` | [Tokenomist](https://tokenomist.ai/) | unlocks futuros (7d/30d, destinatários, cronograma) | Pro ou acima (~1.000 req/mês) |
 | `COINGLASS_API_KEY` | [CoinGlass](https://www.coinglass.com/pricing) | derivativos de várias exchanges + liquidações (sem ela: Binance Futures) | Hobbyist ou acima |
-| `LUNARCRUSH_API_KEY` | [LunarCrush](https://lunarcrush.com/developers) | menções, engajamento, sentimento | Individual ou acima |
+| `LUNARCRUSH_API_KEY` | [LunarCrush](https://lunarcrush.com/developers) | menções, engajamento, sentimento | Individual ou acima — **o plano grátis gera chave, mas a API responde 402** |
 | `NEWSDATA_API_KEY` | [NewsData.io](https://newsdata.io/) | manchetes classificadas (hack, delisting, listing, burn…) | tem plano grátis (com ~12h de atraso) |
 
 Cada camada também tem um interruptor (`ENABLE_TOKENOMICS`, `ENABLE_DERIVATIVES`, `ENABLE_SOCIAL`, `ENABLE_ONCHAIN`, `ENABLE_NEWS`). Os ritmos de chamada e os caches já respeitam os limites desses planos.
+
+O **modo Pré-Binance** vem ligado (`ENABLE_PRE_LISTING=true`) e não precisa de chave: usa CoinGecko, Binance Futures e GoPlus, todos grátis. A faixa de market cap, o volume mínimo e o teto de IA desse modo ficam no bloco "Modo Pré-Binance" do `.env.example`.
 
 ## 8. Testar o setup
 
@@ -183,6 +185,7 @@ Em segundos chega no chat: **🟢 Crypto Radar iniciado**. A primeira varredura 
 | `TELEGRAM_CHAT_ID deve ser numérico` | Algo além do número no `.env` | Deixe só os dígitos (e o `-` do grupo) |
 | Smoke test: `schema desatualizado` | Supabase criado com a versão anterior | Rode o `schema.sql` de novo (não apaga dados) |
 | Log: `Tokenomist indisponível` (ou CoinGlass, LunarCrush…) | Chave errada, plano sem acesso ao endpoint ou limite do plano | A análise segue sem a camada; confira a chave e o plano |
+| `/status`: `⚠️ sem acesso no plano` · smoke: `plano sem acesso a este endpoint` | A chave existe, mas o plano não inclui a API (HTTP 401/402/403) | O provedor se desliga sozinho; faça upgrade do plano ou apague a chave do `.env` |
 | `/status` mostra fonte ⚪ | Chave vazia ou camada desligada no `.env` | Esperado se você não usa aquele provedor |
 
 <div align="right"><a href="#topo">▲ voltar ao topo</a> · <a href="02-como-o-radar-decide.md">Próximo: Como o radar decide →</a></div>

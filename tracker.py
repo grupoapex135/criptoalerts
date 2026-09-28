@@ -1,8 +1,10 @@
 """
 Signal tracking: did each alert reach its target or its invalidation first?
 
-Uses Binance 1h candles since the alert, so a wick that touched a level
-between checks still counts. Rules that keep the score honest:
+Binance-listed assets use Binance 4h candles since the alert (a wick between
+checks still counts). Pre-Binance assets use CoinGecko hourly prices, checked
+every few hours to respect the free quota, and are watched for the moment they
+get listed on Binance spot. Rules that keep the score honest:
 - a signal only counts after price touches the entry zone (a move straight to
   the target without an entry was never a trade);
 - in the candle that enters the zone only a loss can be confirmed, and a candle
@@ -14,6 +16,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
+from analysis.params import PRE_LISTING_TRACK_EVERY_HOURS
 from config import settings
 
 log = logging.getLogger(__name__)
@@ -64,26 +67,57 @@ def result_pct(entry: float | None, close_price: float | None) -> float | None:
     return round((close_price / float(entry) - 1) * 100, 2)
 
 
-def check_open(db, binance, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Updates every OPEN signal; returns the ones that changed status."""
+_last_checked: dict[str, datetime] = {}
+
+
+def _candles(opp: dict[str, Any], binance, coingecko, now: datetime) -> list[dict[str, float]] | None:
+    since_ms = int(opp["detected_at"].timestamp() * 1000)
+    if opp.get("mode") != "pre_listing":
+        return binance.klines(f"{opp['symbol']}USDT", since_ms, interval="4h")
+    # Pre-Binance: CoinGecko prices, only every few hours (free quota).
+    last = _last_checked.get(opp["id"])
+    if last and now - last < timedelta(hours=PRE_LISTING_TRACK_EVERY_HOURS):
+        return None
+    _last_checked[opp["id"]] = now
+    days = (now - opp["detected_at"]).days + 1
+    return [c for c in coingecko.price_series(opp["coin_id"], days) if c["open_time"] >= since_ms]
+
+
+def check_open(db, binance, coingecko=None, now: datetime | None = None) -> list[dict[str, Any]]:
+    """
+    Updates every OPEN signal. Returns events: {"event": "closed", ...} when a signal
+    reaches its target/invalidation/expiry and {"event": "listed", ...} when a
+    pre-Binance asset shows up on Binance spot.
+    """
     now = now or datetime.now(timezone.utc)
-    changed = []
+    events = []
     for opp in db.open_opportunities():
         if opp.get("target_usd") is None or opp.get("invalidation_usd") is None or not opp.get("detected_at"):
             continue
-        pair = f"{opp['symbol']}USDT"
+        if opp.get("mode") == "pre_listing" and not opp.get("binance_listed_at"):
+            try:
+                if binance.spot_pair(opp["symbol"]):
+                    db.mark_listed(opp["id"])
+                    events.append({**opp, "event": "listed"})
+            except Exception as exc:
+                log.warning("tracking %s: checagem de listagem falhou (%s)", opp["symbol"], exc)
+        if opp.get("mode") == "pre_listing" and not (coingecko and opp.get("coin_id")):
+            continue
         try:
-            candles = binance.klines(pair, int(opp["detected_at"].timestamp() * 1000))
+            candles = _candles(opp, binance, coingecko, now)
         except Exception as exc:
-            log.warning("tracking %s: velas indisponíveis (%s)", pair, exc)
+            log.warning("tracking %s: preços indisponíveis (%s)", opp["symbol"], exc)
+            continue
+        if candles is None:
             continue
         status, close_price, entered = evaluate(opp, candles, now)
         if status == OPEN:
             continue
         pct = result_pct(entry_price(opp), close_price) if entered else None
         db.close_opportunity(opp["id"], status, close_price, pct)
-        changed.append({**opp, "status": status, "close_price": close_price, "result_pct": pct, "entered": entered})
-    return changed
+        events.append({**opp, "event": "closed", "status": status, "close_price": close_price,
+                       "result_pct": pct, "entered": entered})
+    return events
 
 
 def stats(rows: list[dict[str, Any]], now: datetime | None = None, days: int = 30) -> dict[str, Any]:
@@ -101,4 +135,8 @@ def stats(rows: list[dict[str, Any]], now: datetime | None = None, days: int = 3
 
     since = now - timedelta(days=days)
     recent = [r for r in rows if r.get("detected_at") and r["detected_at"] >= since]
-    return {"all": summarize(rows), "recent": summarize(recent), "days": days}
+    pre = [r for r in rows if r.get("mode") == "pre_listing"]
+    return {
+        "all": summarize(rows), "recent": summarize(recent), "days": days,
+        "pre_listing": {"total": len(pre), "listed": sum(1 for r in pre if r.get("binance_listed_at"))},
+    }

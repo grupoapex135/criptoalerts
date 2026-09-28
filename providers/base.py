@@ -98,6 +98,34 @@ class RateLimiter:
             self._last = time.time()
 
 
+ACCESS_DENIED = ("HTTP 401", "HTTP 402", "HTTP 403")
+
+
+class KeyedProvider:
+    """
+    Paid API with an optional key. A 401/402/403 means the key or its plan has no
+    access to the endpoint: the provider switches itself off for this run instead
+    of failing (and waiting on its rate limiter) for every asset, and its layer stops
+    counting against data coverage.
+    """
+    name = "provider"
+    api_key = ""
+    blocked: str | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key) and not self.blocked
+
+    def guard(self, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except ProviderError as exc:
+            if any(code in str(exc) for code in ACCESS_DENIED) and not self.blocked:
+                self.blocked = str(exc)
+                log.warning("%s desligado nesta execução: chave ou plano sem acesso (%s)", self.name, exc)
+            raise
+
+
 def safe_call(label: str, fn: Callable[[], Any], default: Any = None) -> Any:
     """Runs an optional provider call; failures are logged and become `default`."""
     try:

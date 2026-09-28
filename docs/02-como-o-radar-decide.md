@@ -21,6 +21,7 @@ Todos os números abaixo são padrões e ficam em [`analysis/params.py`](../anal
 10. [Nota final e cobertura](#10-nota-final-e-cobertura)
 11. [Vetos](#11-vetos)
 12. [A IA e a decisão final](#12-a-ia-e-a-decisão-final)
+13. [Modo Pré-Binance](#13-modo-pré-binance)
 
 ---
 
@@ -63,7 +64,7 @@ Stablecoins são detectadas por lista **e** por comportamento (preço entre US$ 
 
 ## 4. Tendência
 
-Com o histórico diário de 220 dias:
+Com o histórico diário de 220 dias (cache de 12h):
 
 | Estado | Regra |
 |---|---|
@@ -150,6 +151,7 @@ Manchete **informa, não veta**: a marcação por moeda vem do provedor e pode s
 ```text
 nota final = média ponderada das subnotas DISPONÍVEIS
              mercado 15 · tendência 15 · fundamentos 25 · tokenomics 20 · derivativos 10 · on-chain 10 · social 5
+             (+ sinais de listagem 15, só no modo Pré-Binance)
 cobertura  = peso das camadas com dado ÷ peso das camadas com fonte configurada
 ```
 
@@ -173,6 +175,8 @@ Bloqueiam o alerta independentemente da média e aparecem com código e explica�
 | `risk_off_downtrend` | mercado em `risk_off` e ativo em baixa ou capitulação |
 | `extreme_dilution` | FDV ÷ market cap > `MAX_FDV_TO_MCAP_RATIO` |
 | `overheated_leverage` | preço +15% em 24h, OI +40% e funding ≥ 0,05% |
+| `contract_risk` | contrato com risco grave na GoPlus: honeypot, não deixa vender tudo, taxa de venda > 10%, taxa alterável, dono oculto, dono que altera saldos ou retoma o controle; na Solana, freeze, saldo alterável, intransferível |
+| `already_on_binance` | *(Pré-Binance)* o CoinGecko mostra um mercado na Binance — o ativo já está lá com outro ticker (caso real: BTT/BTTC) |
 
 No `/analyze`, um ativo vetado **não chama a IA**: a resposta mostra os motivos e para ali.
 
@@ -199,5 +203,34 @@ A resposta vem em JSON validado por schema. Aí o código decide:
 | IA disse `watch` / `reject` | 👀 observação / rejeitado |
 
 Só o alerta vira mensagem e sinal acompanhado no [placar](03-operacao-e-deploy.md#3-placar-dos-sinais).
+
+## 13. Modo Pré-Binance
+
+O objetivo é achar ativos **com fundamento antes de uma listagem no spot da Binance**. A Binance não publica o que vai listar; o radar trabalha com indícios públicos e mede o resultado.
+
+**Universo:** top `PRE_LISTING_TOP_N` (1000) do CoinGecko, **fora** do spot da Binance, market cap de US$ 10M a US$ 1B, volume ≥ US$ 250 mil. Saem stablecoins (inclusive de outras moedas: JPY, CHF, EUR), embrulhados, staking, ouro e **ações/ETFs tokenizados** (Ondo, xStock, Robinhood) — filtro por nome checado contra o top 1000 real.
+
+**Sinais de listagem** (subnota, 15% do peso, só neste modo):
+
+| Sinal | Fonte | Pontos |
+|---|---|---|
+| **Binance Alpha Spotlight** — a vitrine de pré-listagem da Binance | categoria no CoinGecko | +30 |
+| **Perpétuo na Binance Futures sem spot** — a Binance já negocia o derivativo | lista de perpétuos da Binance | +25 |
+| **Portfólio YZi Labs** (ex-Binance Labs) | categoria no CoinGecko | +15 |
+| **Programas Binance** (HODLer Airdrops, Launchpool, Launchpad, Megadrop, Wallet IDO, Buildkey) | categorias no CoinGecko | +10 |
+| **Corretoras tier-1** (Coinbase, OKX, Bybit, Upbit, Kraken, Bithumb) | mercados do CoinGecko | +15 (≥ 3) · +8 (≥ 1) |
+| Só negocia em DEX | mercados do CoinGecko | −15 |
+
+Base 30. Um ativo que já tem mercado na Binance (outro ticker) é **vetado** aqui.
+
+**Contrato** (GoPlus, grátis, EVM e Solana): sinais graves vetam (`contract_risk`); os moderados (emissão liberada, pausa de transferências, blacklist, proxy, código fechado, top 10 carteiras com > 50%) viram risco e aparecem na mensagem. Moedas nativas (sem contrato) não passam por essa checagem.
+
+**"Com fundamento" é regra para chegar à IA:** fundamentos no DefiLlama **ou** pelo menos um sinal oficial da Binance. Token só-DEX sem contrato checado não vai. Abaixo de US$ 30M: nota mínima +5 e cobertura ≥ 70%.
+
+**Cotas:** até 15 ativos com histórico, 8 com dados profundos e 3 na IA por varredura (`PRE_LISTING_MAX_AI_CANDIDATES`), separados das cotas do modo Binance.
+
+**A IA** recebe o modo e é proibida de afirmar ou prometer listagem; pesa liquidez, onde negocia e o contrato; exige evidência claramente mais forte para só-DEX e small caps.
+
+**Placar:** preços do CoinGecko a cada 6h. Quando o ativo aparece no spot da Binance, o bot avisa e o `/status` conta **quantos sinais Pré-Binance foram listados depois do alerta** — a medida honesta de se a tese funciona.
 
 <div align="right"><a href="#topo">▲ voltar ao topo</a> · <a href="03-operacao-e-deploy.md">Próximo: Operação e deploy →</a></div>

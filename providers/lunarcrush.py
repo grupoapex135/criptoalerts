@@ -8,26 +8,23 @@ from __future__ import annotations
 from typing import Any
 from config import settings
 from analysis.params import CACHE_TTL, MIN_INTERVAL_S
-from providers.base import RateLimiter, cache, http_get_json, pct_change, to_float
+from providers.base import KeyedProvider, RateLimiter, cache, http_get_json, pct_change, to_float
 
 BASE = "https://lunarcrush.com/api4"
 _limiter = RateLimiter(MIN_INTERVAL_S["lunarcrush"])
 
 
-class LunarCrushClient:
-    source = "lunarcrush"
+class LunarCrushClient(KeyedProvider):
+    source = name = "lunarcrush"
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key if api_key is not None else settings.lunarcrush_api_key
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.api_key)
+        self.blocked = None
 
     def _get(self, path: str, params: dict | None = None) -> Any:
         _limiter.wait()
-        payload = http_get_json(f"{BASE}{path}", params=params,
-                                headers={"Authorization": f"Bearer {self.api_key}"}, retries=1)
+        payload = self.guard(lambda: http_get_json(f"{BASE}{path}", params=params,
+                                                   headers={"Authorization": f"Bearer {self.api_key}"}, retries=1))
         return payload.get("data") if isinstance(payload, dict) else payload
 
     def coins(self) -> list[dict[str, Any]]:

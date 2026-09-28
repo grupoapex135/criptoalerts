@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 from config import settings
 from analysis.derivatives import is_overheated
+from analysis.filters import min_volume_for
 from analysis.params import CRITICAL_SUPPLY_GROWTH_30D
 from analysis.tokenomics import dilution_level
 
@@ -17,6 +18,8 @@ LABELS = {
     "risk_off_downtrend": "Mercado em risco e ativo em tendência de baixa",
     "extreme_dilution": "Diluição (FDV ÷ market cap) alta demais",
     "overheated_leverage": "Alta alavancada: preço, open interest e funding esticados",
+    "contract_risk": "Contrato com risco grave (honeypot, taxa abusiva ou dono com poder sobre saldos)",
+    "already_on_binance": "Já negocia na Binance com outro ticker — não é pré-listagem",
 }
 
 
@@ -38,8 +41,13 @@ def compute_vetoes(d: dict[str, Any]) -> list[str]:
 
     volume = market.get("daily_volume_usd") or 0
     mcap = market.get("market_cap_usd") or 0
-    if volume < settings.min_daily_volume_usd or (mcap and volume / mcap < 0.005):
+    if volume < min_volume_for(d.get("mode") or "binance") or (mcap and volume / mcap < 0.005):
         vetoes.append("low_liquidity")
+
+    if (d.get("contract") or {}).get("status") == "danger":
+        vetoes.append("contract_risk")
+    if d.get("mode") == "pre_listing" and (d.get("listing") or {}).get("already_on_binance"):
+        vetoes.append("already_on_binance")
 
     if cat.get("critical_risk"):
         vetoes.append("critical_event")

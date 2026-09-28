@@ -314,3 +314,54 @@ class TestTechnicalAndRelative:
         t = compute_trend(closes, closes[-1], p7=2, p30=8)
         assert t["ma50_ma200"] == "above" and t["dist_ma200_pct"] > 0
         assert t["rsi_daily"] == 100.0 and t["rsi_weekly"] == 100.0
+
+
+
+# ------------------------------------------------------------------ pre-Binance
+from analysis.listing import build_contract, build_listing, listing_score  # noqa: E402
+
+
+class TestPreBinance:
+    PROFILE = {"categories": ["Binance Alpha Spotlight", "Binance HODLer Airdrops", "DeFi"],
+               "cex": ["Upbit", "Bybit"], "cex_ids": ["upbit", "bybit_spot", "gdax"], "dex": ["Uniswap V3"]}
+
+    def test_listing_signals(self):
+        ls = build_listing(self.PROFILE, has_binance_perp=True)
+        assert ls["binance_alpha"] and ls["binance_perp_without_spot"]
+        assert ls["binance_programs"] == ["Binance HODLer Airdrops"]
+        assert ls["tier1_cex"] == ["Bybit", "Coinbase", "Upbit"]
+        assert listing_score(ls) == 100.0  # 30 + alpha 30 + perp 25 + programs 10 + 3 tier-1 15, capped
+
+    def test_no_signals_scores_low_and_dex_only_is_penalized(self):
+        ls = build_listing({"categories": [], "cex": [], "cex_ids": [], "dex": ["Raydium"]}, False)
+        assert ls["dex_only"] is True and listing_score(ls) == 15.0
+        assert listing_score(build_listing(None, False)) is None  # nothing known: no score
+
+    def test_contract_status(self):
+        assert build_contract({"severe": ["honeypot"], "warnings": []})["status"] == "danger"
+        c = build_contract({"severe": [], "warnings": [], "top10_holders_pct": 71.0})
+        assert c["status"] == "warning" and "concentrated_holders" in c["warnings"]
+        assert build_contract(None) == {"available": False, "status": None}
+
+    def test_pre_listing_filter_range(self):
+        small = make_coin(market_cap=15e6, total_volume=400e3, fully_diluted_valuation=20e6)
+        assert prefilter(small) == "market cap below threshold"      # binance mode: $100M floor
+        assert prefilter(small, "pre_listing") is None
+        assert prefilter(make_coin(market_cap=2e9, total_volume=90e6, fully_diluted_valuation=2e9),
+                         "pre_listing") == "market cap above pre-listing range"
+        assert prefilter(make_coin(market_cap=50e6, total_volume=100e3, fully_diluted_valuation=60e6),
+                         "pre_listing") == "volume below threshold"
+
+    def test_contract_risk_vetoes_and_liquidity_follows_the_mode(self):
+        d = dossier(mode="pre_listing", market={"market_cap_usd": 40e6, "daily_volume_usd": 800e3},
+                    contract={"status": "danger"})
+        assert compute_vetoes(d) == ["contract_risk"]      # $800k volume is fine for pre-listing
+        d = dossier(mode="binance", market={"market_cap_usd": 40e6, "daily_volume_usd": 800e3})
+        assert compute_vetoes(d) == ["low_liquidity"]      # but not for a Binance-mode asset
+
+    def test_listing_counts_only_in_pre_listing_mode(self):
+        d = dossier(listing=build_listing(self.PROFILE, True))
+        pre = compute_scores(d, {"market_quality", "trend_quality", "tokenomics", "listing"})
+        listed = compute_scores({**d, "listing": {"available": False}}, {"market_quality", "trend_quality", "tokenomics"})
+        assert pre["listing"] == 100.0 and listed["listing"] is None
+        assert pre["composite"] > listed["composite"]

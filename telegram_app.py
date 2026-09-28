@@ -34,6 +34,18 @@ POSITIONING = {
     "crowded_short": ("🟡", "vendidos demais"), "crowded_long": ("🔴", "comprados demais"),
 }
 SYMBOL_RE = re.compile(r"^\$?([A-Za-z0-9]{2,12})$")
+MODE_LABEL = {"binance": "🟢 BINANCE", "pre_listing": "🚀 PRÉ-BINANCE"}
+CONTRACT_LABELS = {
+    "honeypot": "honeypot (não deixa vender)", "cannot_sell_all": "não permite vender tudo",
+    "owner_can_change_balances": "dono pode alterar saldos", "hidden_owner": "dono oculto",
+    "can_take_back_ownership": "dono pode retomar o controle", "tax_can_be_changed": "taxa pode ser alterada",
+    "high_sell_tax": "taxa de venda acima de 10%", "freeze_authority": "pode congelar carteiras",
+    "non_transferable": "token intransferível", "closable": "contas podem ser fechadas",
+    "mintable": "emissão de novos tokens liberada", "transfers_can_be_paused": "transferências podem ser pausadas",
+    "blacklist_function": "tem blacklist", "upgradeable_proxy": "contrato atualizável",
+    "closed_source": "código fechado", "metadata_mutable": "metadados alteráveis",
+    "transfer_hook": "hook de transferência", "concentrated_holders": "concentração alta em poucas carteiras",
+}
 
 # No dashboard: this in-memory state is what /status shows.
 STATE: dict[str, Any] = {
@@ -107,7 +119,8 @@ def _valuation(d: dict[str, Any]) -> list[str]:
     out = []
     line = f"• Preço: {money(reference_price(d))}"
     if m.get("ath_change_pct") is not None:
-        line += f" ({signed(m['ath_change_pct'])} do topo histórico)"
+        ath = m["ath_change_pct"]
+        line += f" ({signed(ath, 1 if ath <= -99 else 0)} do topo histórico)"
     out.append(line)
     if m.get("price_btc"):
         line = f"• Par BTC: {m['price_btc']:.8f} BTC"
@@ -188,6 +201,51 @@ def _macro(d: dict[str, Any]) -> list[str]:
         out.append(f"• Sentimento: {r['fear_greed_label']} (Fear & Greed {r['fear_greed']})")
     return out
 
+def _where(d: dict[str, Any]) -> str:
+    venue = d.get("venue") or {}
+    if venue.get("binance") or venue.get("exchange") == "Binance":
+        return "Binance"
+    parts = []
+    if venue.get("cex"):
+        parts.append(", ".join(venue["cex"]))
+    if venue.get("dex"):
+        parts.append("DEX: " + ", ".join(venue["dex"]))
+    return " · ".join(parts) or "fora da Binance"
+
+def _listing(d: dict[str, Any]) -> list[str]:
+    """Pre-Binance only: listing hints and the contract check."""
+    if d.get("mode") != "pre_listing":
+        return []
+    ls, ct = d.get("listing") or {}, d.get("contract") or {}
+    out = []
+    if ls.get("binance_alpha"):
+        out.append("• Binance Alpha Spotlight ✅")
+    if ls.get("binance_perp_without_spot"):
+        out.append("• Perpétuo na Binance Futures, ainda sem spot ✅")
+    if ls.get("yzi_labs"):
+        out.append("• Portfólio YZi Labs (ex-Binance Labs) ✅")
+    if ls.get("binance_programs"):
+        out.append("• Programas Binance: " + ", ".join(p.replace("Binance ", "") for p in ls["binance_programs"]))
+    if not out:
+        out.append("• Nenhum sinal oficial da Binance ainda")
+    if ls.get("tier1_cex"):
+        out.append("• Corretoras tier-1: " + ", ".join(ls["tier1_cex"]))
+    elif ls.get("dex_only"):
+        out.append("• Só negocia em DEX 🟡")
+    if ct.get("available"):
+        chain = f" ({ct['chain']})" if ct.get("chain") else ""
+        if ct["status"] == "danger":
+            out.append(f"• Contrato{chain}: 🔴 " + ", ".join(CONTRACT_LABELS.get(x, x) for x in ct["severe"]))
+        elif ct["status"] == "warning":
+            items = [CONTRACT_LABELS.get(x, x) for x in ct["warnings"]]
+            if "concentrated_holders" in ct["warnings"] and ct.get("top10_holders_pct"):
+                items = [i if i != CONTRACT_LABELS["concentrated_holders"]
+                         else f"top 10 carteiras com {ct['top10_holders_pct']:.0f}%" for i in items]
+            out.append(f"• Contrato{chain}: 🟡 " + ", ".join(items))
+        else:
+            out.append(f"• Contrato{chain}: 🟢 sem alertas (GoPlus)")
+    return out
+
 def _plan(result: dict) -> list[str]:
     d, a = result["dossier"], result.get("ai") or {}
     if a.get("entry_min_usd") is None or a.get("target_usd") is None:
@@ -197,7 +255,7 @@ def _plan(result: dict) -> list[str]:
     if (d.get("market_regime") or {}).get("status") == "risk_off":
         limit += " (reduzido: mercado em risco)"
     out = [
-        f"Entrada: {money(a['entry_min_usd'])} – {money(a['entry_max_usd'])} · {'Binance' if d.get('venue') else 'fora da Binance'}",
+        f"Entrada: {money(a['entry_min_usd'])} – {money(a['entry_max_usd'])} · {_where(d)}",
         f"🎯 Alvo: {money(a['target_usd'])} ({pct_from(price, a['target_usd'])}) · "
         f"🛑 Invalidação: {money(a['invalidation_usd'])} ({pct_from(price, a['invalidation_usd'])})",
         f"Risco: {RISK_LABEL.get(result['risk'], result['risk'])} · {limit}",
@@ -210,13 +268,15 @@ def research_message(result: dict, header: str, footer: list[str] | None = None)
     """Sectioned research note: thesis, valuation, technical, macro, plan. Lines without data are omitted."""
     d, a = result["dossier"], result.get("ai") or {}
     asset = d["asset"]
-    lines = [f"{header} — ${asset['symbol']} ({asset.get('name') or asset['symbol']})"]
+    mode = MODE_LABEL.get(d.get("mode") or "binance", "")
+    lines = [f"{header} · {mode} — ${asset['symbol']} ({asset.get('name') or asset['symbol']})"]
 
     def section(title: str, body: list[str]):
         if body:
             lines.extend(["", title, *body])
 
     section("📌 TESE E UTILIDADE", [a["thesis"]] if a.get("thesis") else [])
+    section("🔎 SINAIS DE LISTAGEM", _listing(d))
     section("📊 VALUATION & SAÚDE", _valuation(d))
     section("📉 TÉCNICO & CICLO", _technical(d))
     section("🌍 CONTEXTO MACRO", _macro(d))
@@ -252,6 +312,10 @@ def manual_analysis_message(result: dict) -> str:
     return research_message(result, header, footer)
 
 def tracking_message(opp: dict[str, Any]) -> str:
+    if opp.get("event") == "listed":
+        detected = opp.get("detected_at")
+        when = f" (sinal de {detected.astimezone(TZ).strftime('%d/%m')})" if detected else ""
+        return f"🚀 ${opp['symbol']} foi listada no spot da Binance!{when}\nPreço no alerta: {money(opp.get('price_usd'))}"
     if opp["status"] == tracker.EXPIRED and not opp.get("entered", True):
         return f"⌛ {opp['symbol']} expirou sem o preço entrar na zona de entrada"
     head = {
@@ -323,7 +387,9 @@ async def send_opportunity(context: ContextTypes.DEFAULT_TYPE, result: dict):
         "quantitative_score": d["scores"].get("composite"),
         "market_cap_usd": d["market"].get("market_cap_usd"),
         "daily_volume_usd": d["market"].get("daily_volume_usd"),
-        "venue": "Binance",
+        "venue": (d.get("venue") or {}).get("exchange") or "Binance",
+        "mode": d.get("mode") or "binance",
+        "coin_id": d["asset"].get("id"),
         "reason": a.get("short_reason"),
         "market_regime": (d.get("market_regime") or {}).get("status"),
         "scores": d.get("scores"),
@@ -370,7 +436,7 @@ async def scanner_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def tracker_job(context: ContextTypes.DEFAULT_TYPE):
     try:
-        changed = await asyncio.to_thread(tracker.check_open, db, radar.binance)
+        changed = await asyncio.to_thread(tracker.check_open, db, radar.binance, radar.cg)
     except Exception:
         log.exception("[tracker] erro")
         return
@@ -385,7 +451,8 @@ def scan_summary(report: dict) -> str:
     lines = [
         "🔎 Varredura concluída", "",
         f"Mercado: {regime[0]} {regime[1]}",
-        f"{report['universe']} ativos → {report['deep']} a fundo → {report['candidates']} na IA",
+        f"{report['universe']} ativos ({report.get('universe_pre_listing', 0)} pré-Binance) → "
+        f"{report['deep']} a fundo → {report['candidates']} na IA",
         f"✅ {len(report['results'])} alerta(s)",
     ]
     if report["watch"]:
@@ -419,7 +486,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/unwatch BTC — tira da lista\n"
         "/id — mostra seu chat ID\n\n"
         "Você também pode escrever: “analisa PENDLE”.\n\n"
-        "Nos alertas: 🟢 bom · 🟡 neutro · 🔴 ruim · ⚪ sem dados.\n"
+        "Nos alertas: 🟢 BINANCE = já listada · 🚀 PRÉ-BINANCE = ainda fora do spot da Binance.\n"
         f"Varredura automática a cada {settings.scan_interval_minutes} min."
     )
 
@@ -449,6 +516,7 @@ def _stats_block(st: dict[str, Any]) -> list[str]:
     a, r = st["all"], st["recent"]
     if not a["total"]:
         return ["📊 RADAR", "", "Nenhum sinal ainda."]
+    pre = st.get("pre_listing") or {}
     lines = [
         "📊 RADAR", "",
         f"Sinais: {a['total']}",
@@ -462,18 +530,24 @@ def _stats_block(st: dict[str, Any]) -> list[str]:
         f"{r['total']} sinais · {r['TARGET_HIT']} alvo · {r['INVALIDATED']} invalidados · "
         f"{r['OPEN']} abertos" + (f" · {r['EXPIRED']} expirados" if r["EXPIRED"] else ""),
     ]
+    if pre.get("total"):
+        lines += ["", f"🚀 Pré-Binance: {pre['total']} sinais · {pre['listed']} listados na Binance depois do alerta"]
     return lines
 
 def _sources_line() -> str:
     def mark(on: bool) -> str:
         return "✅" if on else "⚪"
+
+    def keyed(flag: bool, client) -> str:
+        # ⚠️ = key present but the plan has no access (the provider switched itself off).
+        return "⚠️ sem acesso no plano" if flag and client.api_key and client.blocked else mark(flag and client.enabled)
     parts = [
         "DefiLlama ✅",
         f"Derivativos {mark(settings.enable_derivatives)}"
         + (" (CoinGlass)" if radar.coinglass.enabled else " (Binance)" if settings.enable_derivatives else ""),
-        f"Unlocks {mark(settings.enable_tokenomics and radar.tokenomist.enabled)}",
-        f"Social {mark(settings.enable_social and radar.lunarcrush.enabled)}",
-        f"Notícias {mark(settings.enable_news and radar.news.enabled)}",
+        f"Unlocks {keyed(settings.enable_tokenomics, radar.tokenomist)}",
+        f"Social {keyed(settings.enable_social, radar.lunarcrush)}",
+        f"Notícias {keyed(settings.enable_news, radar.news)}",
         f"Hacks {mark(settings.enable_news)}",
         f"On-chain {mark('onchain' in radar.enabled_layers())}",
     ]

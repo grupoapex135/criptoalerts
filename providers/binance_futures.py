@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 from typing import Any
 from config import settings
 from analysis.params import CACHE_TTL
@@ -18,6 +19,17 @@ class BinanceFuturesClient:
 
     def _get(self, path: str, params: dict) -> Any:
         return http_get_json(f"{self.base}{path}", params=params, retries=1)
+
+    def perp_bases(self) -> set[str]:
+        """Base assets with a live USDT perpetual (1000PEPE -> PEPE). Cached for hours."""
+        def fetch():
+            payload = self._get("/fapi/v1/exchangeInfo", {})
+            return {
+                re.sub(r"^1000+", "", s["baseAsset"])
+                for s in payload.get("symbols", [])
+                if s.get("contractType") == "PERPETUAL" and s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT"
+            }
+        return cache.get_or_set("bnf:perps", CACHE_TTL["binance_perps"], fetch)
 
     def derivatives(self, symbol: str) -> dict[str, Any] | None:
         symbol = symbol.upper()

@@ -281,3 +281,52 @@ def test_bulk_tickers_fall_back_when_a_pair_was_delisted():
     with mock.patch("providers.binance.http_get_json", side_effect=fake):
         out = client.tickers(["UNIUSDT", "GONEUSDT"])
     assert list(out) == ["UNIUSDT"] and out["UNIUSDT"]["last_price"] == 8.0
+
+
+def test_family_with_a_sibling_pointing_to_another_coin_is_a_collision():
+    # Real case: coin "Velo" (Stellar) got Velodrome's TVL and revenue — both use the VELO ticker,
+    # Velodrome's versions have no gecko_id, only the parent entry does.
+    protocols = [
+        {"id": "10", "name": "Velodrome V2", "symbol": "VELO", "parentProtocol": "parent#velodrome",
+         "category": "Dexs", "tvl": 40e6},
+        {"id": "11", "name": "Velodrome V3", "symbol": "VELO", "parentProtocol": "parent#velodrome",
+         "category": "Dexs", "tvl": 30e6},
+        {"id": "12", "name": "Velodrome", "symbol": "VELO", "gecko_id": "velodrome-finance",
+         "parentProtocol": "parent#velodrome", "category": "Dexs", "tvl": 0},
+    ]
+    llama = DefiLlamaClient()
+    assert llama.protocol_context("velo", "VELO", protocols) is None
+    assert llama.protocol_context("velodrome-finance", "VELO", protocols)["tvl"] == 70e6
+
+
+def test_exact_gecko_id_beats_ticker_matches():
+    # Real data (Sep/2026): Velodrome versions have no gecko_id; "Velo Finance" declares gecko_id "velo".
+    protocols = [
+        {"id": "1799", "name": "Velodrome V3", "symbol": "VELO", "parentProtocol": "parent#velodrome",
+         "category": "Dexs", "tvl": 20e6},
+        {"id": "3302", "name": "Velodrome V2", "symbol": "VELO", "parentProtocol": "parent#velodrome",
+         "category": "Dexs", "tvl": 17e6},
+        {"id": "900", "name": "Velo Finance", "symbol": "VELO", "gecko_id": "velo", "category": "Dexs", "tvl": 80e3},
+    ]
+    llama = DefiLlamaClient()
+    assert llama.protocol_context("velo", "VELO", protocols) is None           # its own protocol is too small
+    assert llama.protocol_context("velodrome-finance", "VELO", protocols)["tvl"] == 37e6
+
+
+def test_paid_provider_switches_off_when_the_plan_has_no_access():
+    # Real case: a valid LunarCrush key on the free plan returns HTTP 402 on every call.
+    client = LunarCrushClient(api_key="k")
+    with mock.patch("providers.lunarcrush.http_get_json", side_effect=ProviderError("x -> HTTP 402")) as get, \
+         mock.patch("providers.lunarcrush._limiter"):
+        with pytest.raises(ProviderError):
+            client.coins()
+        assert client.enabled is False and "402" in client.blocked
+    assert get.call_count == 1
+
+
+def test_transient_errors_do_not_switch_the_provider_off():
+    client = NewsClient(api_key="k")
+    with mock.patch("providers.news.http_get_json", side_effect=ProviderError("x -> HTTP 503")):
+        with pytest.raises(ProviderError):
+            client.headlines(["BTC"])
+    assert client.enabled is True

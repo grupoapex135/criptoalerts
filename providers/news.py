@@ -8,21 +8,18 @@ from __future__ import annotations
 from typing import Any
 from config import settings
 from analysis.params import CACHE_TTL
-from providers.base import MISS, cache, http_get_json
+from providers.base import MISS, KeyedProvider, cache, http_get_json
 
 BASE = "https://newsdata.io/api/1/crypto"
 BATCH = 5  # coins per request: one credit covers several finalists
 
 
-class NewsClient:
-    source = "newsdata"
+class NewsClient(KeyedProvider):
+    source = name = "newsdata"
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key if api_key is not None else settings.newsdata_api_key
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.api_key)
+        self.blocked = None
 
     def headlines(self, symbols: list[str]) -> dict[str, list[dict[str, Any]]]:
         """Recent headlines per symbol (uppercase keys). Uncached symbols are fetched in batches."""
@@ -38,8 +35,8 @@ class NewsClient:
         for i in range(0, len(missing), BATCH):
             batch = missing[i:i + BATCH]
             # Key in a header, not the URL: request errors quote the URL in logs/Telegram.
-            payload = http_get_json(BASE, params={"coin": ",".join(b.lower() for b in batch), "language": "en"},
-                                    headers={"X-ACCESS-KEY": self.api_key})
+            params = {"coin": ",".join(b.lower() for b in batch), "language": "en"}
+            payload = self.guard(lambda: http_get_json(BASE, params=params, headers={"X-ACCESS-KEY": self.api_key}))
             grouped = self.normalize(payload, batch)
             for s in batch:
                 out[s] = grouped.get(s, [])

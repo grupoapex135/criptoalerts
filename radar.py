@@ -1,7 +1,11 @@
 """
 Scanner pipeline. Expensive work only happens for survivors of cheaper stages:
 
-  top N coins ─ prefilter + Binance pair ─▶ stage 1 (bulk data, no per-coin calls)
+  Two modes share the funnel, each with its own quotas:
+    binance      — assets on Binance spot (top TOP_COINS_TO_SCAN)
+    pre_listing  — assets NOT on Binance spot yet (top PRE_LISTING_TOP_N, $10M–$1B)
+
+  top N coins ─ prefilter per mode ─────▶ stage 1 (bulk data, no per-coin calls)
              ─ top TREND_CANDIDATES ─────▶ stage 2 (90d history: trend, supply growth)
              ─ top DEEP_CANDIDATES ──────▶ stage 3 (unlocks, derivatives, social, news, TVL 30d)
              ─ no vetoes, score ok ──────▶ AI (top MAX_AI_CANDIDATES) ─▶ code checks ─▶ alert
@@ -18,6 +22,7 @@ from analysis.catalysts import build_catalysts
 from analysis.derivatives import build_derivatives
 from analysis.filters import prefilter
 from analysis.fundamentals import build_fundamentals
+from analysis.listing import build_contract, build_listing
 from analysis.market_regime import build_market_regime
 from analysis.onchain import build_onchain
 from analysis.scoring import compute_scores, coverage_penalty, risk_label
@@ -33,6 +38,7 @@ from providers.coinglass import CoinGlassClient
 from providers.lunarcrush import LunarCrushClient
 from providers.news import NewsClient
 from providers.onchain import get_onchain_provider
+from providers.security import token_security
 from providers.sentiment import fear_greed
 from providers.tokenomist import TokenomistClient
 
@@ -59,9 +65,11 @@ def position_limit_brl(factor: float = 1.0) -> float:
     return round(settings.capital_brl * (settings.max_position_pct / 100.0) * factor, 2)
 
 
-def enabled_layers() -> set[str]:
+def enabled_layers(mode: str = "binance") -> set[str]:
     """Layers that have a configured source; the rest don't lower data coverage."""
     layers = {"market_quality", "trend_quality", "fundamentals", "tokenomics"}
+    if mode == "pre_listing":
+        layers.add("listing")
     if settings.enable_derivatives:
         layers.add("derivatives")
     if settings.enable_social and lunarcrush.enabled:
@@ -142,8 +150,10 @@ def binance_venue(symbol: str, coingecko_price: float, ticker: dict[str, Any] | 
 class Candidate:
     """One asset moving through the funnel: provider context + the dossier the AI will read."""
 
-    def __init__(self, coin: dict[str, Any], bulk: dict[str, Any], regime: dict[str, Any]):
+    def __init__(self, coin: dict[str, Any], bulk: dict[str, Any], regime: dict[str, Any],
+                 mode: str = "binance", perps: set[str] | frozenset = frozenset()):
         self.coin = coin
+        self.mode = mode
         self.id = str(coin.get("id") or "")
         self.symbol = str(coin.get("symbol") or "").upper()
         self.market = market_snapshot(coin)
@@ -163,7 +173,11 @@ class Candidate:
         self.tvl_change_30d: float | None = None
         self.unlocks: dict[str, Any] | None = None
         self.venue: dict[str, Any] | None = None
+        self.profile: dict[str, Any] | None = None
+        self.contract_raw: dict[str, Any] | None = None
+        self.has_perp = self.symbol in perps
         self.dossier: dict[str, Any] = {
+            "mode": mode,
             "asset": {"id": self.id, "symbol": self.symbol, "name": self.coin.get("name")},
             "market_regime": {k: v for k, v in regime.items() if k != "adjustments"},
             "market": self.market,
@@ -190,14 +204,49 @@ class Candidate:
                                                           m["market_cap_usd"], p30)
         self.dossier["tokenomics"] = build_tokenomics(self.coin, supply_growth_30d(caps, prices),
                                                       self.unlocks, holders)
-        self.dossier["venue"] = ({"exchange": "Binance", "pair": self.venue["symbol"],
-                                  "last_price": self.venue["last_price"]} if self.venue else None)
-        self.dossier["scores"] = compute_scores(self.dossier, enabled_layers())
+        self.dossier["venue"] = self._venue()
+        if self.mode == "pre_listing":
+            self.dossier["listing"] = build_listing(self.profile, self.has_perp)
+            self.dossier["contract"] = build_contract(self.contract_raw)
+        else:
+            self.dossier["listing"] = {"available": False}
+            self.dossier["contract"] = {"available": False, "status": None}
+        self.dossier["scores"] = compute_scores(self.dossier, enabled_layers(self.mode))
         self.dossier["vetoes"] = compute_vetoes(self.dossier)
+
+    def _venue(self) -> dict[str, Any] | None:
+        if self.mode == "binance":
+            return ({"exchange": "Binance", "binance": True, "pair": self.venue["symbol"],
+                     "last_price": self.venue["last_price"]} if self.venue else None)
+        profile = self.profile or {}
+        cex, dex = profile.get("cex") or [], profile.get("dex") or []
+        # Off Binance there is no single venue price: CoinGecko's aggregate is the reference.
+        return {"exchange": (cex or dex or [None])[0], "binance": False, "cex": cex[:3], "dex": dex[:2],
+                "last_price": self.price}
 
     @property
     def composite(self) -> float:
         return self.dossier["scores"]["composite"]
+
+    def eligible_for_ai(self, min_score: float) -> bool:
+        scores = self.dossier["scores"]
+        min_coverage = P.MIN_DATA_COVERAGE_FOR_AI
+        if self.mode == "pre_listing" and self.market["market_cap_usd"] < P.PRE_LISTING_SMALL_CAP_USD:
+            # Small caps need more evidence ("it depends on the research and the fundamentals").
+            min_score += P.PRE_LISTING_SMALL_CAP_EXTRA_SCORE
+            min_coverage = P.PRE_LISTING_SMALL_CAP_MIN_COVERAGE
+        if self.mode == "pre_listing":
+            listing, contract = self.dossier.get("listing") or {}, self.dossier.get("contract") or {}
+            has_fundamentals = (self.dossier.get("fundamentals") or {}).get("available")
+            has_binance_signal = any(listing.get(k) for k in (
+                "binance_alpha", "binance_perp_without_spot", "yzi_labs", "binance_programs"))
+            # The goal is assets WITH fundamentals before a Binance listing, not random small caps.
+            if not (has_fundamentals or has_binance_signal):
+                return False
+            # A DEX-only token whose contract could not be checked is not worth the risk.
+            if listing.get("dex_only") and not contract.get("available"):
+                return False
+        return not self.dossier["vetoes"] and scores["composite"] >= min_score and scores["data_coverage"] >= min_coverage
 
 
 def reference_price(dossier: dict[str, Any]) -> float:
@@ -207,10 +256,11 @@ def reference_price(dossier: dict[str, Any]) -> float:
 
 # ------------------------------------------------------------------ stages
 def add_profile(c: Candidate):
-    """Official description + categories, only for assets about to be read by the AI."""
-    profile = safe_call(f"Perfil {c.symbol}", lambda: cg.coin_profile(c.id)) or {}
-    c.dossier["asset"]["description"] = profile.get("description") or (c.ctx or {}).get("description")
-    c.dossier["asset"]["categories"] = profile.get("categories") or []
+    """Description, categories, venues and contracts. Binance mode: only before the AI."""
+    if c.profile is None:
+        c.profile = safe_call(f"Perfil {c.symbol}", lambda: cg.coin_profile(c.id)) or {}
+    c.dossier["asset"]["description"] = c.profile.get("description") or (c.ctx or {}).get("description")
+    c.dossier["asset"]["categories"] = (c.profile.get("categories") or [])[:8]
 
 
 def add_history(c: Candidate):
@@ -222,6 +272,10 @@ def add_history(c: Candidate):
 
 def add_deep_data(c: Candidate, hacks: list[dict[str, Any]], headlines: dict[str, list] | None):
     m = c.market
+    if c.mode == "pre_listing":
+        # Listing signals, where it trades and the contract check all come from the profile.
+        add_profile(c)
+        c.contract_raw = safe_call(f"Contrato {c.symbol}", lambda: token_security(c.profile.get("platforms") or {}))
     if settings.enable_tokenomics and tokenomist.enabled:
         c.unlocks = safe_call(f"Tokenomist {c.symbol}",
                               lambda: tokenomist.unlocks(c.id, c.symbol, to_float(c.coin.get("circulating_supply"))))
@@ -334,47 +388,77 @@ def decide(dossier: dict[str, Any], ai: dict[str, Any], regime: dict[str, Any]) 
 
 
 # ------------------------------------------------------------------ entry points
-def scan_candidates(skip_symbol: Callable[[str], bool] | None = None,
-                    watchlist: Iterable[str] = ()) -> tuple[dict[str, Any], list[Candidate], dict[str, Any]]:
-    """Runs the funnel up to (not including) the AI. Returns regime, finalists and funnel stats."""
-    watch = {s.upper() for s in watchlist}
-    coins = cg.markets(settings.top_coins_to_scan)
-    regime = get_market_regime(coins)
-    bulk = load_bulk()
+def _universe_limit() -> int:
+    return max(settings.top_coins_to_scan, settings.pre_listing_top_n if settings.enable_pre_listing else 0)
 
-    universe = []
-    for coin in coins:
-        if prefilter(coin):
-            continue
-        if not binance.spot_pair(str(coin.get("symbol") or "")):
-            continue  # MVP only alerts assets on Binance spot
-        universe.append(Candidate(coin, bulk, regime))
+
+def _mode_of(coin: dict[str, Any]) -> str | None:
+    return "binance" if binance.spot_pair(str(coin.get("symbol") or "")) else (
+        "pre_listing" if settings.enable_pre_listing else None)
+
+
+def _perps() -> set[str]:
+    return safe_call("Binance Futures (perpétuos)", futures.perp_bases, set()) if settings.enable_pre_listing else set()
+
+
+def _run_mode(mode: str, universe: list[Candidate], skip_symbol, watch: set[str],
+              min_score: float) -> tuple[list[Candidate], list[Candidate], list[Candidate]]:
+    """Stages 2 and 3 for one mode. Returns (deep, vetoed, finalists)."""
     universe.sort(key=lambda c: c.composite, reverse=True)
-
     # Cooldown before any per-coin call: repeated symbols cost nothing.
     fresh = [c for c in universe if not (skip_symbol and skip_symbol(c.symbol))]
     stage2 = _pick(fresh, P.TREND_CANDIDATES, watch)
 
-    tickers = binance.tickers([f"{c.symbol}USDT" for c in stage2])
-    confirmed = []
-    for c in stage2:
-        c.venue = binance_venue(c.symbol, c.price, tickers.get(f"{c.symbol}USDT"))
-        if c.venue:
+    if mode == "binance":
+        tickers = binance.tickers([f"{c.symbol}USDT" for c in stage2])
+        confirmed = []
+        for c in stage2:
+            c.venue = binance_venue(c.symbol, c.price, tickers.get(f"{c.symbol}USDT"))
+            if c.venue:
+                add_history(c)
+                confirmed.append(c)
+    else:
+        for c in stage2:
             add_history(c)
-            confirmed.append(c)
+        confirmed = list(stage2)
     confirmed.sort(key=lambda c: c.composite, reverse=True)
 
     stage3 = _pick([c for c in confirmed if not c.dossier["vetoes"]], P.DEEP_CANDIDATES, watch)
     run_deep_stage(stage3)
 
-    vetoed = [c for c in confirmed if c.dossier["vetoes"]]
-    min_score = regime["adjustments"]["min_score"]
-    finalists = sorted((c for c in stage3 if not c.dossier["vetoes"] and c.composite >= min_score
-                        and c.dossier["scores"]["data_coverage"] >= P.MIN_DATA_COVERAGE_FOR_AI),
-                       key=lambda c: c.composite, reverse=True)[: settings.max_ai_candidates]
+    limit = settings.max_ai_candidates if mode == "binance" else settings.pre_listing_max_ai_candidates
+    finalists = sorted((c for c in stage3 if c.eligible_for_ai(min_score)),
+                       key=lambda c: c.composite, reverse=True)[:limit]
+    return stage3, [c for c in confirmed if c.dossier["vetoes"]], finalists
+
+
+def scan_candidates(skip_symbol: Callable[[str], bool] | None = None,
+                    watchlist: Iterable[str] = ()) -> tuple[dict[str, Any], list[Candidate], dict[str, Any]]:
+    """Runs the funnel up to (not including) the AI. Returns regime, finalists and funnel stats."""
+    watch = {s.upper() for s in watchlist}
+    coins = cg.markets(_universe_limit())
+    regime = get_market_regime(coins)
+    bulk = load_bulk()
+    perps = _perps()
+
+    by_mode: dict[str, list[Candidate]] = {"binance": [], "pre_listing": []}
+    for rank, coin in enumerate(coins):
+        mode = _mode_of(coin)
+        if mode == "binance" and rank >= settings.top_coins_to_scan:
+            continue
+        if mode and not prefilter(coin, mode):
+            by_mode[mode].append(Candidate(coin, bulk, regime, mode, perps))
+
+    deep, vetoed, finalists = [], [], []
+    for mode, universe in by_mode.items():
+        d, v, f = _run_mode(mode, universe, skip_symbol, watch, regime["adjustments"]["min_score"])
+        deep += d
+        vetoed += v
+        finalists += f
     stats = {
-        "universe": len(universe),
-        "deep": len(stage3),
+        "universe": sum(len(u) for u in by_mode.values()),
+        "universe_pre_listing": len(by_mode["pre_listing"]),
+        "deep": len(deep),
         "vetoed": [f"{c.symbol}: {', '.join(c.dossier['vetoes'])}" for c in vetoed][:8],
     }
     return regime, finalists, stats
@@ -413,14 +497,16 @@ def evaluate_candidates(skip_symbol: Callable[[str], bool] | None = None,
 def analyze_symbol(query_symbol: str) -> dict[str, Any] | None:
     """Full dossier for one asset, even if it would not pass the scanner's filters."""
     symbol = query_symbol.strip().upper()
-    coins = cg.markets(settings.top_coins_to_scan)
+    coins = cg.markets(_universe_limit())
     coin = next((c for c in coins if str(c.get("symbol") or "").upper() == symbol), None)
     if not coin:
         return None
 
     regime = get_market_regime(coins)
-    c = Candidate(coin, load_bulk(), regime)
-    c.venue = binance_venue(symbol, c.price)
+    mode = _mode_of(coin) or "binance"
+    c = Candidate(coin, load_bulk(), regime, mode, _perps() if mode == "pre_listing" else set())
+    if mode == "binance":
+        c.venue = binance_venue(symbol, c.price)
     add_history(c)
     run_deep_stage([c])
 

@@ -70,6 +70,15 @@ class Settings:
     alert_cooldown_hours: int = _int("ALERT_COOLDOWN_HOURS", 24)
 
     tracker_interval_minutes: int = _int("TRACKER_INTERVAL_MINUTES", 30)
-    opportunity_expiry_days: int = _int("OPPORTUNITY_EXPIRY_DAYS", 14)
+    # Medium/long-term horizon: a signal stays open for up to this many days.
+    opportunity_expiry_days: int = _int("OPPORTUNITY_EXPIRY_DAYS", 90)
+
+    # Pre-Binance mode: assets NOT on Binance spot yet, from the wider top-N universe.
+    enable_pre_listing: bool = _bool("ENABLE_PRE_LISTING", True)
+    pre_listing_top_n: int = _int("PRE_LISTING_TOP_N", 1000)
+    pre_listing_min_mcap_usd: float = _float("PRE_LISTING_MIN_MCAP_USD", 10_000_000)
+    pre_listing_max_mcap_usd: float = _float("PRE_LISTING_MAX_MCAP_USD", 1_000_000_000)
+    pre_listing_min_volume_usd: float = _float("PRE_LISTING_MIN_VOLUME_USD", 250_000)
+    pre_listing_max_ai_candidates: int = _int("PRE_LISTING_MAX_AI_CANDIDATES", 3)
 
 settings = Settings()

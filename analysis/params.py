@@ -17,6 +17,7 @@ HISTORY_DAYS = 220
 # Composite = weighted average of the AVAILABLE subscores (missing data is
 # re-weighted away, never scored as negative). `risk` is reported separately.
 WEIGHTS = {
+    "listing": 15,          # Pre-Binance mode only: listing signals (None for listed assets)
     "market_quality": 15,
     "trend_quality": 15,
     "fundamentals": 25,
@@ -29,6 +30,31 @@ WEIGHTS = {
 MAX_COVERAGE_PENALTY = 20
 # An alert needs converging evidence: below this share of layers with data, no AI call.
 MIN_DATA_COVERAGE_FOR_AI = 0.5
+
+# ---------------------------------------------------------------- pre-Binance mode
+# Below this market cap an asset needs more evidence (higher score and coverage).
+PRE_LISTING_SMALL_CAP_USD = 30_000_000
+PRE_LISTING_SMALL_CAP_EXTRA_SCORE = 5
+PRE_LISTING_SMALL_CAP_MIN_COVERAGE = 0.7
+# Assets off Binance are tracked on CoinGecko prices; check them less often (quota).
+PRE_LISTING_TRACK_EVERY_HOURS = 6
+# Exchanges whose listing counts as a quality signal.
+MAJOR_CEX = {
+    "gdax": "Coinbase", "okex": "OKX", "bybit_spot": "Bybit", "upbit": "Upbit", "kraken": "Kraken",
+    "bithumb": "Bithumb", "bitget": "Bitget", "kucoin": "KuCoin", "gate": "Gate", "mxc": "MEXC",
+}
+TIER1_CEX = {"gdax", "okex", "bybit_spot", "upbit", "kraken", "bithumb"}
+# Binance programs that usually precede or accompany a spot listing (CoinGecko categories).
+BINANCE_PROGRAM_CATEGORIES = {
+    "Binance Alpha Spotlight": "binance_alpha",
+    "YZi Labs (Prev. Binance Labs) Portfolio": "yzi_labs",
+    "Binance Wallet IDO": "binance_program",
+    "Binance HODLer Airdrops": "binance_program",
+    "Binance Launchpool": "binance_program",
+    "Binance Launchpad": "binance_program",
+    "Binance Megadrop": "binance_program",
+    "Binance Buildkey TGE": "binance_program",
+}
 
 # ---------------------------------------------------------------- market regime
 REGIME = {
@@ -100,7 +126,7 @@ CATALYST_LOOKBACK_DAYS = 30   # hacks/news older than this are ignored
 
 # ---------------------------------------------------------------- paid API pacing
 # Minimum seconds between calls, to stay under each plan's per-minute limit.
-MIN_INTERVAL_S = {"coinglass": 2.1, "lunarcrush": 6.5, "tokenomist": 0.6}
+MIN_INTERVAL_S = {"coinglass": 2.1, "lunarcrush": 6.5, "tokenomist": 0.6, "goplus": 2.0}
 
 # ---------------------------------------------------------------- AI output guard
 MAX_VENUE_PRICE_GAP_PCT = 5.0   # CoinGecko vs Binance price: above this, different asset
@@ -110,8 +136,11 @@ MAX_ENTRY_DISTANCE_PCT = 10.0
 CACHE_TTL = {
     "coingecko_markets": 5 * 60,
     "coingecko_global": 5 * 60,
-    "coingecko_history": 6 * 3600,
+    # Daily candles: 12h keeps the reading and the CoinGecko Demo quota (10k/month) safe.
+    "coingecko_history": 12 * 3600,
     "coingecko_profile": 24 * 3600,
+    "binance_perps": 6 * 3600,
+    "contract_security": 24 * 3600,
     "fear_greed": 3600,
     "defillama_protocols": 15 * 60,
     "defillama_overviews": 15 * 60,

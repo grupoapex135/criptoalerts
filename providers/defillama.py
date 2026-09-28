@@ -92,7 +92,22 @@ class DefiLlamaClient:
                 continue
             key = p.get("parentProtocol") or p.get("id") or p.get("name")
             families.setdefault(str(key), []).append(p)
+        # Pull in siblings that carry a gecko_id, so the family check below sees them.
+        for p in protocols:
+            key = p.get("parentProtocol")
+            if key and str(key) in families and p not in families[str(key)] and p.get("category") not in self.EXCLUDED_CATEGORIES:
+                families[str(key)].append(p)
 
+        # A protocol that declares this exact coin id wins over ticker matches. Real case:
+        # coin "velo" (Velo, Stellar) matched Velodrome's versions (VELO, no gecko_id) although
+        # DefiLlama has "Velo Finance" with gecko_id "velo".
+        own = {k: ms for k, ms in families.items() if any(m.get("gecko_id") == coin_id for m in ms)}
+        if own:
+            families = own
+        else:
+            # Ticker matches only; drop families where any member points to another coin.
+            families = {k: ms for k, ms in families.items()
+                        if not any(m.get("gecko_id") and m.get("gecko_id") != coin_id for m in ms)}
         if not families:
             return None
 

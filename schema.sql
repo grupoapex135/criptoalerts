@@ -63,6 +63,14 @@ end $$;
 
 create index if not exists opportunities_status_idx on opportunities(status);
 
+-- ------------------------------------------------------------------ v3: Pre-Binance mode
+-- binance = asset on Binance spot when alerted; pre_listing = not listed yet.
+alter table opportunities add column if not exists mode text not null default 'binance';
+-- CoinGecko id: pre-Binance signals are tracked on CoinGecko prices.
+alter table opportunities add column if not exists coin_id text;
+-- When a pre-Binance signal's asset showed up on Binance spot.
+alter table opportunities add column if not exists binance_listed_at timestamptz;
+
 create table if not exists watchlist (
     symbol text primary key,
     created_at timestamptz not null default now(),

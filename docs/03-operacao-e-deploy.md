@@ -48,18 +48,19 @@ Usa o mesmo formato em seções do alerta e acrescenta a nota final (0–100), a
 
 Cada alerta vira um **sinal** salvo com preço no alerta, entrada, alvo, invalidação, confiança, subnotas e o dossiê completo que a IA leu.
 
-A cada `TRACKER_INTERVAL_MINUTES` (30), o radar lê as velas de 1h da Binance desde o alerta:
+A cada `TRACKER_INTERVAL_MINUTES` (30), o radar lê as velas de 4h da Binance desde o alerta — ou, para sinais 🚀 Pré-Binance, os preços horários do CoinGecko, conferidos a cada 6h por causa da cota:
 
 | Estado | Quando |
 |---|---|
 | `OPEN` | nenhum nível tocado ainda |
 | `TARGET_HIT` | a máxima de uma vela tocou o alvo |
 | `INVALIDATED` | a mínima de uma vela tocou a invalidação |
-| `EXPIRED` | passou `OPPORTUNITY_EXPIRY_DAYS` (14) sem tocar nenhum |
+| `EXPIRED` | passou `OPPORTUNITY_EXPIRY_DAYS` (90) sem tocar nenhum |
 
 Regras que mantêm o placar honesto:
 
 - **Vale o primeiro nível tocado**, em ordem cronológica.
+- **Sinal Pré-Binance que aparece no spot da Binance** gera um aviso próprio (`🚀 $X foi listada no spot da Binance!`) e entra na contagem do `/status`.
 - **Vela que toca os dois níveis conta como invalidada** — dentro de 1h não dá para saber a ordem, e o placar nunca é inflado.
 - **Expirado não é vitória nem derrota**: aparece separado e fica fora do win rate.
 - O resultado é medido a partir do **preço no alerta**.
@@ -86,6 +87,8 @@ Win rate encerrados: 68%
 
 Últimos 30d:
 9 sinais · 6 alvo · 2 invalidados · 1 abertos
+
+🚀 Pré-Binance: 7 sinais · 2 listados na Binance depois do alerta
 
 🩺 Saúde
 Mercado: 🟢 favorável — BTC -2.0% em 7d e +7.8% em 30d, acima da média de 50 dias.
@@ -116,6 +119,7 @@ Horários em Brasília.
 | 🟢 **Crypto Radar iniciado** | toda vez que o processo sobe — se aparecer sem você reiniciar, o servidor reiniciou o bot |
 | 🟢 **OPORTUNIDADE** | um ativo passou em todas as camadas |
 | 🎯 / 🛑 / ⌛ | um sinal bateu o alvo, foi invalidado ou expirou |
+| 🚀 **foi listada no spot da Binance** | um sinal Pré-Binance apareceu na Binance |
 | ⚠️ **Crypto Radar com problema** | varredura falhou ou a IA errou — no máximo uma vez a cada 3 horas |
 
 Silêncio por horas é normal: significa que nada convergiu. Para ter certeza de que está vivo, `/status`.
@@ -124,8 +128,9 @@ Silêncio por horas é normal: significa que nada convergiu. Para ter certeza de
 
 | Item | Consumo aproximado (varredura a cada 60 min) | Custo |
 |---|---|---|
-| **OpenAI** | até `MAX_AI_CANDIDATES` análises por varredura + 1 por `/analyze` | **pago** — o principal custo |
-| CoinGecko | 2 a 3 mil chamadas/mês | grátis no plano Demo (10 mil/mês) |
+| **OpenAI** | até `MAX_AI_CANDIDATES` + `PRE_LISTING_MAX_AI_CANDIDATES` análises por varredura + 1 por `/analyze` | **pago** — o principal custo |
+| CoinGecko | ~7 mil chamadas/mês com os dois modos (4 páginas de mercado por varredura, históricos, perfis, placar Pré-Binance) | grátis no plano Demo (10 mil/mês) |
+| GoPlus | 1 chamada por finalista Pré-Binance a cada 24h | grátis |
 | DefiLlama, Binance Spot/Futures, Telegram | dados públicos, em cache | grátis |
 | Supabase | poucas linhas por dia | grátis |
 | Tokenomist | ~1 chamada por finalista a cada 12h | plano Pro ou acima |

@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 from config import settings
 from analysis.params import CACHE_TTL, MIN_INTERVAL_S
-from providers.base import RateLimiter, ProviderError, cache, http_get_json, to_float
+from providers.base import KeyedProvider, RateLimiter, ProviderError, cache, http_get_json, to_float
 
 BASE = "https://open-api-v4.coinglass.com"
 _limiter = RateLimiter(MIN_INTERVAL_S["coinglass"])
@@ -19,19 +19,17 @@ def _all_row(rows: list[dict[str, Any]] | None) -> dict[str, Any]:
     return next((r for r in rows if str(r.get("exchange")).lower() == "all"), rows[0] if rows else {})
 
 
-class CoinGlassClient:
-    source = "coinglass"
+class CoinGlassClient(KeyedProvider):
+    source = name = "coinglass"
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key if api_key is not None else settings.coinglass_api_key
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.api_key)
+        self.blocked = None
 
     def _get(self, path: str, params: dict) -> Any:
         _limiter.wait()
-        payload = http_get_json(f"{BASE}{path}", params=params, headers={"CG-API-KEY": self.api_key}, retries=1)
+        payload = self.guard(lambda: http_get_json(f"{BASE}{path}", params=params,
+                                                   headers={"CG-API-KEY": self.api_key}, retries=1))
         if str(payload.get("code")) != "0":
             raise ProviderError(f"coinglass {path}: {payload.get('msg')}")
         return payload.get("data")

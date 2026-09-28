@@ -61,9 +61,23 @@ def binance_futures():
 
 def optional_providers():
     import radar
-    for name, client in (("Tokenomist", radar.tokenomist), ("CoinGlass", radar.coinglass),
-                         ("LunarCrush", radar.lunarcrush), ("NewsData", radar.news)):
-        print(f"   {name}: {'chave configurada' if client.enabled else 'sem chave (camada usa fonte grátis ou fica sem dados)'}")
+    # One real, cheap call per configured key: a key can be valid while its plan has no API access.
+    probes = (
+        ("Tokenomist", radar.tokenomist, lambda: radar.tokenomist.token_list()),
+        ("CoinGlass", radar.coinglass, lambda: radar.coinglass.derivatives("BTC")),
+        ("LunarCrush", radar.lunarcrush, lambda: radar.lunarcrush.coins()),
+        ("NewsData", radar.news, lambda: radar.news.headlines(["BTC"])),
+    )
+    for name, client, probe in probes:
+        if not client.api_key:
+            print(f"   {name}: sem chave (camada usa fonte grátis ou fica sem dados)")
+            continue
+        try:
+            probe()
+            print(f"   {name}: OK — chave com acesso")
+        except Exception as exc:
+            reason = "plano sem acesso a este endpoint" if client.blocked else "falhou"
+            print(f"   {name}: ⚠️ {reason} — {redact(str(exc))[:160]}")
     print(f"   On-chain: {'ligado' if 'onchain' in radar.enabled_layers() else 'desligado'}")
 
 def telegram():
@@ -84,11 +98,11 @@ def supabase():
         return
     db.client.table("alerts").select("id").limit(1).execute()
     try:
-        db.client.table("opportunities").select("id,status,scores,dossier").limit(1).execute()
+        db.client.table("opportunities").select("id,status,scores,dossier,mode,coin_id,binance_listed_at").limit(1).execute()
         db.client.table("watchlist").select("symbol").limit(1).execute()
     except Exception as exc:
         raise RuntimeError(f"schema desatualizado — rode schema.sql de novo no SQL Editor ({exc})") from exc
-    print("   OK — tabelas alerts, opportunities (v2) e watchlist acessíveis")
+    print("   OK — tabelas alerts, opportunities (v3) e watchlist acessíveis")
 
 def openai_analysis():
     import radar

@@ -9,6 +9,7 @@ from typing import Any
 from analysis.params import MAX_COVERAGE_PENALTY, WEIGHTS
 from analysis.derivatives import derivatives_score
 from analysis.fundamentals import fundamentals_score
+from analysis.listing import listing_score
 from analysis.onchain import onchain_score
 from analysis.social import social_score
 from analysis.tokenomics import tokenomics_score
@@ -51,6 +52,10 @@ def compute_risk(d: dict[str, Any]) -> float:
     r += min(20, 10 * len(cat.get("negative") or []))
     if cat.get("critical_risk"):
         r += 30
+    contract = d.get("contract") or {}
+    r += min(15, 5 * len(contract.get("warnings") or []))
+    if (d.get("listing") or {}).get("dex_only"):
+        r += 10
     high, low = trend.get("high_30d"), trend.get("low_30d")
     if high and low and high / low - 1 > 0.6:
         r += 10  # very wide 30d range = volatile
@@ -63,6 +68,7 @@ def risk_label(risk: float) -> str:
 
 def compute_scores(d: dict[str, Any], enabled_layers: set[str] | None = None) -> dict[str, Any]:
     subs = {
+        "listing": listing_score(d.get("listing") or {}),
         "market_quality": market_quality_score(d.get("market") or {}),
         "trend_quality": trend_score(d.get("trend") or {}),
         "fundamentals": fundamentals_score(d.get("fundamentals") or {}),

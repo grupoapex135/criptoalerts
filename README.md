@@ -29,6 +29,14 @@
 
 > ativo líquido **+** fundamentos melhorando **+** tokenomics aceitável **+** sem unlock pesado chegando **+** mercado geral saudável **+** derivativos sem alavancagem excessiva **+** preço numa zona interessante
 
+O radar trabalha em **dois modos**, lado a lado:
+
+- **🟢 BINANCE** — ativos que já estão no spot da Binance (top 200).
+- **🚀 PRÉ-BINANCE** — ativos **com fundamento que ainda não estão no spot da Binance** (US$ 10M a US$ 1B, top 1000), pontuados pelos sinais que costumam anteceder uma listagem: Binance Alpha, portfólio YZi Labs (ex-Binance Labs), programas da Binance, perpétuo na Binance Futures sem spot e corretoras tier-1. Inclui tokens de DEX, sempre com checagem do contrato.
+
+> [!IMPORTANT]
+> Ninguém sabe o que a Binance vai listar — ela não publica isso. O modo Pré-Binance **não prevê listagens**: ele encontra ativos com fundamento fora da Binance e mostra os indícios. O placar registra, sem esconder, quantos sinais foram de fato listados depois.
+
 A complexidade fica no backend. No Telegram chega uma nota de pesquisa curta: o que o projeto faz e por que tem utilidade, valuation, técnico, contexto de mercado e um plano de referência — em português simples. Não existe dashboard — alertas, comandos, placar e avisos de erro acontecem no chat.
 
 ## <a id="exemplo"></a>📨 Como chega um alerta
@@ -36,7 +44,7 @@ A complexidade fica no backend. No Telegram chega uma nota de pesquisa curta: o 
 Uma nota de pesquisa curta, em seções, que explica **o que é o projeto** antes de falar de preço — para separar fundamento de ruído. Linha sem dado não aparece.
 
 ```text
-💎 OPORTUNIDADE — $LDO (Lido DAO)
+💎 OPORTUNIDADE · 🟢 BINANCE — $LDO (Lido DAO)
 
 📌 TESE E UTILIDADE
 Maior protocolo de staking líquido de Ethereum: transforma ETH em stETH,
@@ -71,6 +79,20 @@ Risco: Médio · Limite: R$ 600,00
 💡 Entradas fracionadas dentro da zona, respeitando a invalidação.
 
 ⚠️ Pesquisa, não recomendação. Principal risco: queda do ETH arrastando o setor.
+```
+
+No modo Pré-Binance, a nota ganha uma seção própria e o "onde" mostra as corretoras e DEX onde o ativo negocia:
+
+```text
+💎 OPORTUNIDADE · 🚀 PRÉ-BINANCE — $FLUID (Fluid)
+
+🔎 SINAIS DE LISTAGEM
+• Binance Alpha Spotlight ✅
+• Perpétuo na Binance Futures, ainda sem spot ✅
+• Corretoras tier-1: Bybit, Coinbase, Upbit
+• Contrato (ethereum): 🟡 top 10 carteiras com 53%
+...
+Entrada: $3.90 – $4.05 · Upbit, Bybit, Gate · DEX: Uniswap V3
 ```
 
 <sub>Exemplo ilustrativo. A tese é escrita pela IA **só a partir da descrição e das categorias oficiais** do projeto (CoinGecko/DefiLlama) — nada de parcerias ou notícias inventadas. O "limite" é o teto por posição que *você* define no `.env` e cai pela metade quando o mercado está em risco.</sub>
@@ -108,18 +130,18 @@ Só **Telegram** e **OpenAI** são obrigatórios. Todo o resto é grátis ou opc
 
 ## <a id="arquitetura"></a>🗺️ Arquitetura
 
-O pipeline trabalha em camadas: chamada cara (histórico, APIs pagas, IA) só acontece para quem sobreviveu às etapas baratas.
+O pipeline trabalha em camadas: chamada cara (histórico, APIs pagas, IA) só acontece para quem sobreviveu às etapas baratas. Os dois modos passam pelo mesmo funil, cada um com suas cotas.
 
 ```mermaid
 flowchart TB
     subgraph S1["① Funil barato · todos os ativos"]
         direction LR
-        CG["🦎 Top 200<br/>CoinGecko"] --> F["🧹 Filtros<br/>stable · liquidez · FDV"] --> R["🌡️ Regime<br/>BTC · ETH · mercado"] --> S["📊 Subnotas<br/>dados em lote"]
+        CG["🦎 Top 1000<br/>CoinGecko"] --> F["🧹 Filtros por modo<br/>stable · tokenizado · liquidez · FDV"] --> R["🌡️ Regime<br/>BTC · ETH · mercado"] --> S["📊 Subnotas<br/>dados em lote"]
     end
 
     subgraph S2["② Aprofundamento · só os melhores"]
         direction LR
-        H["📈 Tendência<br/>MA20 · MA50 · 90 dias"] --> D["🔬 Dados profundos<br/>unlocks · derivativos · social · hacks"] --> V["🚫 Vetos<br/>unlock · hack · alavancagem"]
+        H["📈 Tendência<br/>MA20 · MA50 · MA200"] --> D["🔬 Dados profundos<br/>unlocks · derivativos · listagem · contrato"] --> V["🚫 Vetos<br/>unlock · hack · contrato"]
     end
 
     subgraph S3["③ Decisão e acompanhamento"]
@@ -127,19 +149,19 @@ flowchart TB
         AI["🤖 IA cética<br/>alert · watch · reject"] --> G["✅ Travas do código<br/>confiança · níveis · regime"] --> TG["📨 Telegram"] --> TR["🎯 Placar<br/>alvo · invalidação"]
     end
 
-    S1 -- "top 15" --> S2
-    S2 -- "top 5 sem veto" --> S3
+    S1 -- "top 15 por modo" --> S2
+    S2 -- "top 5 + 3 sem veto" --> S3
 ```
 
-| Etapa | Quantos ativos | O que custa |
-|---|---|---|
-| Filtros + subnotas em lote | ~90 dos 200 | 1 chamada CoinGecko + datasets do DefiLlama (um por tipo, em cache) |
-| Tendência (histórico 90d) | 15 | 1 chamada por ativo, cache de 6h |
-| Dados profundos | 8 (+ watchlist) | APIs pagas se houver chave; Binance Futures e hacks grátis |
-| IA | até 5 | 1 chamada OpenAI por ativo |
-| Alertas | 0 a 3, normalmente | — |
+| Etapa | 🟢 Binance | 🚀 Pré-Binance | O que custa |
+|---|---|---|---|
+| Filtros + subnotas em lote | ~90 do top 200 | ~220 do top 1000 | 4 páginas do CoinGecko + datasets do DefiLlama (em cache) |
+| Tendência (histórico 220d) | 15 | 15 | 1 chamada por ativo, cache de 12h |
+| Dados profundos | 8 (+ watchlist) | 8 (+ watchlist) | perfil, corretoras e contrato (Pré-Binance); APIs pagas se houver chave |
+| IA | até 5 | até 3 | 1 chamada OpenAI por ativo |
+| Alertas | 0 a 3, normalmente | 0 a 2, normalmente | — |
 
-Uma varredura leva ~20–30s com cache frio e ~5s com cache quente, antes da IA (medido com dados reais).
+Uma varredura completa (os dois modos) leva ~45s com cache frio, antes da IA (medido com dados reais).
 
 **Regime de mercado muda a régua, não desliga o radar:**
 
@@ -149,12 +171,13 @@ Uma varredura leva ~20–30s com cache frio e ~5s com cache quente, antes da IA 
 | 🟡 `neutral` | sem tendência clara | critérios normais |
 | 🔴 `risk_off` | BTC ≤ −10% em 7d, ≤ −20% em 30d, queda forte no curto e médio prazo, ou mercado total ≤ −7% no dia | confiança mínima sobe para `MARKET_RISK_OFF_MIN_CONFIDENCE`, nota mínima +10, limite por posição cai pela metade, e ativo em tendência de baixa é **vetado** |
 
-## <a id="camadas"></a>🧩 As oito camadas
+## <a id="camadas"></a>🧩 As camadas
 
 Cada camada devolve dados estruturados e uma subnota de 0 a 100 — ou `None` quando não há dado. **Ausência de dado nunca vira nota ruim:** a nota final é a média ponderada só das camadas disponíveis, e a falta de dados reduz a confiança (cobertura).
 
 | Camada | O que lê | Peso |
 |---|---|---|
+| 🔎 **Sinais de listagem** *(só Pré-Binance)* | Binance Alpha Spotlight, portfólio YZi Labs, programas Binance (HODLer, Launchpool, Wallet IDO…), perpétuo na Binance Futures sem spot, corretoras tier-1, só-DEX · **contrato** via GoPlus (honeypot, taxa, dono oculto, freeze, concentração) | 15% |
 | 💧 **Qualidade de mercado** | liquidez (volume ÷ market cap), tamanho, volume absoluto | 15% |
 | 📈 **Tendência** | MA20, MA50, distância das médias, faixa de 30/90 dias → alta · lateral · baixa · capitulação; recuo saudável × esticado × parabólico. Mais MA200, cruz de ouro/morte, RSI diário/semanal e desconto contra o BTC como leitura de ciclo | 15% |
 | 🏗️ **Fundamentos** | TVL e variação 7d/30d, fees, receita, receita repassada a holders, volume DEX, valor emprestado, market cap ÷ receita anual, divergências (preço caindo + receita subindo) | 25% |
@@ -164,7 +187,9 @@ Cada camada devolve dados estruturados e uma subnota de 0 a 100 — ou `None` qu
 | 💬 **Social** | menções, engajamento, criadores, sentimento → quieto · emergente · em alta · eufórico (euforia é **risco**, não sinal de compra) | 5% |
 | 📰 **Catalisadores** | hacks recentes e manchetes classificadas (hack, delisting, processo, listing, burn, upgrade…) | vira veto ou risco |
 
-**Vetos bloqueiam o alerta, não importa a média:** unlock crítico em 30 dias · oferta inflando demais · liquidez muito baixa · hack/exploit/delisting recente · `risk_off` + tendência de baixa · FDV ÷ market cap absurdo · alta alavancada (preço +15%, OI +40%, funding quente).
+**Vetos bloqueiam o alerta, não importa a média:** unlock crítico em 30 dias · oferta inflando demais · liquidez muito baixa · hack/exploit recente · `risk_off` + tendência de baixa · FDV ÷ market cap absurdo · alta alavancada (preço +15%, OI +40%, funding quente) · **contrato com risco grave** · **já negocia na Binance com outro ticker** (não é pré-listagem).
+
+**No Pré-Binance, "com fundamento" é regra:** para chegar à IA o ativo precisa ter fundamentos no DefiLlama **ou** pelo menos um sinal oficial da Binance; se só negocia em DEX, o contrato tem de ter sido checado; abaixo de US$ 30M, exige nota maior e 70% de cobertura. Ações tokenizadas, embrulhados, staking e ativos lastreados são excluídos por nome.
 
 Detalhes, fórmulas e thresholds: **[Como o radar decide](docs/02-como-o-radar-decide.md)**.
 
@@ -174,11 +199,12 @@ Detalhes, fórmulas e thresholds: **[Como o radar decide](docs/02-como-o-radar-d
 
 | Provedor | Camada | Chave | Sem chave… |
 |---|---|---|---|
-| **CoinGecko** | mercado, regime, tendência, oferta, descrição e categorias do projeto | opcional ([Demo grátis](https://www.coingecko.com/en/api/pricing)) | funciona no limite público |
+| **CoinGecko** | mercado (top 1000), regime, tendência, oferta, descrição, categorias, corretoras e contratos do projeto; preço do placar Pré-Binance | opcional ([Demo grátis](https://www.coingecko.com/en/api/pricing)) | funciona no limite público |
 | **Fear & Greed** (alternative.me) | sentimento do mercado | não | — |
 | **DefiLlama** | fundamentos, captura de valor, hacks | não | — |
 | **Binance Spot** | par negociável, preço, placar dos sinais | não | — |
-| **Binance Futures** | derivativos (funding, OI, long/short) | não | — |
+| **Binance Futures** | derivativos (funding, OI, long/short) e lista de perpétuos (sinal de pré-listagem) | não | — |
+| **GoPlus** | segurança de contrato (EVM e Solana) | não | — |
 | **Tokenomist** | unlocks futuros | `TOKENOMIST_API_KEY` (plano Pro+) | usa o crescimento real da oferta nos últimos 30d |
 | **CoinGlass** | derivativos multi-exchange + liquidações | `COINGLASS_API_KEY` (Hobbyist+) | usa Binance Futures |
 | **LunarCrush** | social | `LUNARCRUSH_API_KEY` (Individual+) | camada sem dados |
@@ -187,7 +213,7 @@ Detalhes, fórmulas e thresholds: **[Como o radar decide](docs/02-como-o-radar-d
 | **OpenAI** | analista final | `OPENAI_API_KEY` | obrigatório |
 | **Supabase** | histórico, placar, watchlist | opcional | tudo em memória (zera ao reiniciar) |
 
-Cada provedor tem timeout, retry limitado e cache com TTL. Se um cair, a camada fica indisponível, o erro vai para o log e a análise continua — com cobertura menor.
+Cada provedor tem timeout, retry limitado e cache com TTL. Se um cair, a camada fica indisponível, o erro vai para o log e a análise continua — com cobertura menor. Uma chave válida cujo **plano não dá acesso** ao endpoint (HTTP 401/402/403 — caso real: LunarCrush no plano grátis) desliga o provedor sozinho naquela execução: ele para de ser chamado, não reduz a cobertura e aparece como `⚠️ sem acesso no plano` no `/status`. `python smoke_test.py` faz uma chamada real com cada chave configurada e diz qual funciona.
 
 ## <a id="comandos"></a>🤖 Comandos
 
@@ -204,7 +230,7 @@ Também entende texto livre: `analisa pendle`, `olha SOL`.
 
 ## <a id="placar"></a>🎯 Placar dos sinais
 
-Todo alerta vira um sinal acompanhado: a cada 30 minutos o radar lê as velas de 1h da Binance desde o alerta e fecha o sinal como **TARGET_HIT**, **INVALIDATED** ou **EXPIRED** (14 dias sem tocar nenhum dos dois), avisando no chat. Para o placar nunca ser inflado: o sinal só conta depois que o preço **entra na zona de entrada**, uma vela que toca alvo e invalidação conta como **invalidada**, e nada depois da expiração vale.
+Todo alerta vira um sinal acompanhado por até **90 dias** (horizonte de médio/longo prazo). A cada 30 minutos o radar lê as velas de 4h da Binance desde o alerta — ou, no Pré-Binance, os preços do CoinGecko a cada 6h — e fecha o sinal como **TARGET_HIT**, **INVALIDATED** ou **EXPIRED**, avisando no chat. Quando um sinal Pré-Binance **aparece no spot da Binance**, o bot avisa: `🚀 $X foi listada no spot da Binance!`. Para o placar nunca ser inflado: o sinal só conta depois que o preço **entra na zona de entrada**, uma vela que toca alvo e invalidação conta como **invalidada**, e nada depois da expiração vale.
 
 ```text
 📊 RADAR
@@ -219,6 +245,8 @@ Win rate encerrados: 68%
 
 Últimos 30d:
 9 sinais · 6 alvo · 2 invalidados · 1 abertos
+
+🚀 Pré-Binance: 7 sinais · 2 listados na Binance depois do alerta
 ```
 
 ## <a id="configuracao"></a>⚙️ Configuração
@@ -234,7 +262,11 @@ Tudo mora no `.env` (modelo completo em [`.env.example`](.env.example)). Os ajus
 | `MARKET_RISK_OFF_MIN_CONFIDENCE` | `80` | Confiança mínima quando o mercado está em risco |
 | `CRITICAL_UNLOCK_30D_PCT` | `10` | Unlock (ou inflação de oferta) em 30d que bloqueia o alerta |
 | `ENABLE_TOKENOMICS` / `DERIVATIVES` / `SOCIAL` / `ONCHAIN` / `NEWS` | `true` (on-chain `false`) | Liga e desliga camadas |
-| `TRACKER_INTERVAL_MINUTES` / `OPPORTUNITY_EXPIRY_DAYS` | `30` / `14` | Acompanhamento dos sinais |
+| `TRACKER_INTERVAL_MINUTES` / `OPPORTUNITY_EXPIRY_DAYS` | `30` / `90` | Acompanhamento dos sinais |
+| `ENABLE_PRE_LISTING` | `true` | Liga o modo Pré-Binance |
+| `PRE_LISTING_MIN_MCAP_USD` / `MAX` | `10000000` / `1000000000` | Faixa de market cap do Pré-Binance |
+| `PRE_LISTING_MIN_VOLUME_USD` | `250000` | Volume mínimo no Pré-Binance |
+| `PRE_LISTING_TOP_N` / `PRE_LISTING_MAX_AI_CANDIDATES` | `1000` / `3` | Tamanho do universo e teto de IA do Pré-Binance |
 | `CAPITAL_BRL` / `MAX_POSITION_PCT` | `20000` / `3` | Teto por posição exibido no alerta |
 
 Pesos das camadas, thresholds de tendência, derivativos, social e TTLs de cache ficam centralizados em [`analysis/params.py`](analysis/params.py).
@@ -243,7 +275,7 @@ Pesos das camadas, thresholds de tendência, derivativos, social e TTLs de cache
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                 # 119 testes; qualquer acesso à internet reprova o teste
+pytest                 # 160 testes; qualquer acesso à internet reprova o teste
 ruff check .           # erros reais: imports, nomes indefinidos, sintaxe
 python smoke_test.py   # checagem contra as APIs reais (--ai inclui uma análise paga)
 ```
@@ -299,7 +331,12 @@ criptoalerts/
 ## <a id="limitacoes"></a>⚠️ Limitações conhecidas
 
 - **Não é previsão.** Os pesos e thresholds são escolhas iniciais, ainda sem backtest; o placar existe justamente para medir se funcionam.
-- **Adapters pagos testados só com mock.** Tokenomist, CoinGlass, LunarCrush e NewsData foram escritos contra a documentação oficial (set/2026), mas não rodaram com uma chave real. A unidade do funding da CoinGlass não é explícita na documentação (tratada como %).
+- **Pré-Binance não adivinha listagem.** Os sinais (Alpha, perpétuo sem spot, YZi Labs, tier-1) são indícios públicos, não um calendário. O placar conta quantos foram listados de fato.
+- **Tickers repetidos.** Duas moedas com o mesmo símbolo no CoinGecko compartilham cooldown e `/analyze` pega a de maior market cap. Ações tokenizadas e embrulhados são filtrados por nome — heurística checada contra o top 1000 real, pode deixar passar nomes novos.
+- **DEX por heurística.** Um mercado é classificado como DEX pelo nome ou por cotar endereços de contrato. A checagem de contrato (GoPlus) cobre redes EVM e Solana; outras redes ficam sem checagem (e token só-DEX sem checagem não vai para a IA).
+- **Placar Pré-Binance mais grosso.** Sem velas da Binance, usa preços horários do CoinGecko (sem máximas/mínimas intra-hora), conferidos a cada 6h por causa da cota.
+- **Cota do CoinGecko.** Com os dois modos e varredura a cada 60 min, a estimativa é ~7 mil chamadas/mês (Demo: 10 mil). Se estourar: aumente `SCAN_INTERVAL_MINUTES` ou reduza `PRE_LISTING_TOP_N`.
+- **Adapters pagos parcialmente validados.** O NewsData rodou com chave real. LunarCrush respondeu 402 no plano grátis (a API exige o plano Individual), então o parsing dela, do Tokenomist e da CoinGlass segue testado só com mock contra a documentação oficial (set/2026). A unidade do funding da CoinGlass não é explícita na documentação (tratada como %).
 - **Unlocks só de cliff.** O Tokenomist devolve eventos de cliff; emissão linear aparece apenas como crescimento real da oferta. Por limite de plano (~1.000 req/mês no Pro), unlocks ficam em cache por 12h.
 - **Derivativos grátis = só Binance.** Sem CoinGlass, OI e funding são de uma exchange e não há liquidações.
 - **Notícias chegam atrasadas.** O plano grátis do NewsData tem ~12h de atraso: serve de contexto. Risco crítico em tempo real depende da base de hacks do DefiLlama, que é curada e pode demorar.
@@ -327,7 +364,7 @@ criptoalerts/
 - [x] Regime de mercado e tendência (recuo saudável × queda estrutural)
 - [x] Fundamentos, tokenomics, derivativos, social, catalisadores e vetos
 - [x] Placar dos sinais com `/status` e watchlist
-- [ ] **Modo Pré-Binance** — moedas fora do spot da Binance com fundamento e sinais de listagem (Binance Alpha, YZi Labs, perpétuo sem spot), incluindo DEX com checagem de contrato
+- [x] **Modo Pré-Binance** — moedas fora do spot da Binance com fundamento e sinais de listagem, DEX com checagem de contrato e aviso de listagem no placar
 - [ ] Rodar os adapters pagos com chave real
 - [ ] Provedor on-chain (CryptoQuant, Glassnode ou Nansen)
 - [ ] Backtest dos pesos com o histórico do placar

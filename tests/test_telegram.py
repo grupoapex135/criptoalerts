@@ -51,7 +51,8 @@ def result(**over):
 class TestMessages:
     def test_alert_is_a_sectioned_research_note(self):
         msg = T.opportunity_message(result())
-        assert msg.startswith("💎 OPORTUNIDADE — $LDO (Lido DAO)")
+        assert msg.startswith("💎 OPORTUNIDADE · 🟢 BINANCE — $LDO (Lido DAO)")
+        assert "🔎 SINAIS DE LISTAGEM" not in msg  # listed asset: no listing section
         for section in ("📌 TESE E UTILIDADE", "📊 VALUATION & SAÚDE", "📉 TÉCNICO & CICLO",
                         "🌍 CONTEXTO MACRO", "✅ POR QUE AGORA", "🎯 PLANO DE REFERÊNCIA"):
             assert section in msg
@@ -89,7 +90,7 @@ class TestMessages:
 
     def test_manual_analysis_shows_score_and_coverage(self):
         msg = T.manual_analysis_message(result(decision="watch"))
-        assert msg.startswith("👀 OBSERVAR — $LDO (Lido DAO)")
+        assert msg.startswith("👀 OBSERVAR · 🟢 BINANCE — $LDO (Lido DAO)")
         assert "Nota 84/100 · cobertura de dados 100% · confiança 74%" in msg
         assert "⚠️ Principal risco: Mercado volátil." in msg
 
@@ -97,7 +98,7 @@ class TestMessages:
         r = result(decision="reject", ai=None, confidence=None,
                    dossier=dossier(vetoes=["critical_unlock", "critical_event"]))
         msg = T.manual_analysis_message(r)
-        assert msg.startswith("🔴 BLOQUEADO — $LDO")
+        assert msg.startswith("🔴 BLOQUEADO · 🟢 BINANCE — $LDO")
         assert "📌 TESE" not in msg and "🎯 PLANO" not in msg  # no AI call, no thesis or plan
         assert "🚫 Desbloqueio grande de tokens nos próximos 30 dias" in msg
         assert "🚫 Hack ou exploit recente no protocolo" in msg
@@ -124,8 +125,63 @@ class TestMessages:
                   "rejected": [], "errors": []}
         text = T.scan_summary(report)
         assert "Mercado: 🔴 em risco" in text
-        assert "120 ativos → 8 a fundo → 3 na IA" in text
+        assert "120 ativos (0 pré-Binance) → 8 a fundo → 3 na IA" in text
         assert "👀 Em observação: UNI" in text
+
+
+class TestPreBinanceMessages:
+    def pre(self, **over):
+        d = dossier(
+            mode="pre_listing",
+            asset={"id": "instadapp", "symbol": "FLUID", "name": "Fluid"},
+            venue={"exchange": "Upbit", "binance": False, "cex": ["Upbit", "Bybit", "Gate"], "dex": ["Uniswap V3"],
+                   "last_price": 1.20},
+            listing={"available": True, "binance_alpha": True, "binance_perp_without_spot": True, "yzi_labs": False,
+                     "binance_programs": ["Binance HODLer Airdrops"], "tier1_cex": ["Bybit", "Coinbase", "Upbit"],
+                     "dex_only": False},
+            contract={"available": True, "status": "warning", "chain": "ethereum", "severe": [],
+                      "warnings": ["mintable", "concentrated_holders"], "top10_holders_pct": 62.0},
+        )
+        d.update(over)
+        return result(dossier=d)
+
+    def test_pre_listing_alert_has_label_signals_and_venues(self):
+        msg = T.opportunity_message(self.pre())
+        assert msg.startswith("💎 OPORTUNIDADE · 🚀 PRÉ-BINANCE — $FLUID (Fluid)")
+        for line in ("🔎 SINAIS DE LISTAGEM", "• Binance Alpha Spotlight ✅",
+                     "• Perpétuo na Binance Futures, ainda sem spot ✅", "• Programas Binance: HODLer Airdrops",
+                     "• Corretoras tier-1: Bybit, Coinbase, Upbit",
+                     "• Contrato (ethereum): 🟡 emissão de novos tokens liberada, top 10 carteiras com 62%",
+                     "Entrada: $1.18 – $1.22 · Upbit, Bybit, Gate · DEX: Uniswap V3"):
+            assert line in msg, line
+
+    def test_no_binance_signal_is_said_plainly(self):
+        d = self.pre()["dossier"]
+        d["listing"] = {"available": True, "binance_alpha": False, "binance_perp_without_spot": False,
+                        "yzi_labs": False, "binance_programs": [], "tier1_cex": [], "dex_only": True}
+        msg = T.opportunity_message(result(dossier=d))
+        assert "• Nenhum sinal oficial da Binance ainda" in msg
+        assert "• Só negocia em DEX 🟡" in msg
+
+    def test_dangerous_contract_is_spelled_out(self):
+        d = self.pre()["dossier"]
+        d["contract"] = {"available": True, "status": "danger", "chain": "base", "severe": ["honeypot"], "warnings": []}
+        msg = T.manual_analysis_message(result(decision="reject", ai=None, confidence=None,
+                                               dossier={**d, "vetoes": ["contract_risk"]}))
+        assert "• Contrato (base): 🔴 honeypot (não deixa vender)" in msg
+        assert "🚫 Contrato com risco grave" in msg
+
+    def test_listed_event_message(self):
+        from datetime import datetime, timezone
+        text = T.tracking_message({"event": "listed", "symbol": "FLUID", "price_usd": 3.1,
+                                   "detected_at": datetime(2026, 9, 1, 15, tzinfo=timezone.utc)})
+        assert text == "🚀 $FLUID foi listada no spot da Binance! (sinal de 01/09)\nPreço no alerta: $3.1"
+
+    def test_status_counts_listings_after_the_alert(self):
+        st = {"all": {"total": 3, "OPEN": 3, "TARGET_HIT": 0, "INVALIDATED": 0, "EXPIRED": 0, "win_rate": None},
+              "recent": {"total": 3, "OPEN": 3, "TARGET_HIT": 0, "INVALIDATED": 0, "EXPIRED": 0}, "days": 30,
+              "pre_listing": {"total": 2, "listed": 1}}
+        assert "🚀 Pré-Binance: 2 sinais · 1 listados na Binance depois do alerta" in "\n".join(T._stats_block(st))
 
 
 class TestAuth:
