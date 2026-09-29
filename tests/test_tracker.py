@@ -168,6 +168,7 @@ def test_cooldown_symbols_come_from_one_query():
     db = Database()
     db.enabled = True
     db.client = FakeSupabase([{"symbol": "PENDLE"}, {"symbol": "UNI"}])
-    db.save_alert(None, "ldo", "1", "m")
+    db._has_kind = True  # schema v4 check already done (it runs once per process)
+    db._sent_at["LDO"] = datetime.now(timezone.utc)
     assert db.recent_alert_symbols() == {"PENDLE", "UNI", "LDO"}
-    assert db.client.selects == 1
+    assert db.client.selects == 1  # one query per scan, not one per coin

@@ -339,3 +339,10 @@ def test_meme_flag_from_profile_categories():
     from analysis.listing import build_listing
     assert build_listing({"categories": ["Solana Meme", "Binance Alpha Spotlight"]}, True)["meme"] is True
     assert build_listing({"categories": ["Decentralized Finance (DeFi)"]}, True)["meme"] is False
+
+
+def test_only_pre_listing_is_analyzed_when_binance_is_paused(pre_mocked):
+    report = radar.evaluate_candidates(modes=("pre_listing",))
+    seen = {c.args[0]["asset"]["symbol"] for c in pre_mocked["analyze"].call_args_list}
+    assert "PENDLE" not in seen and "FLUID" in seen
+    assert all(r["dossier"]["mode"] == "pre_listing" for r in report["results"])

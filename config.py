@@ -79,6 +79,12 @@ class Settings:
     pre_listing_min_mcap_usd: float = _float("PRE_LISTING_MIN_MCAP_USD", 10_000_000)
     pre_listing_max_mcap_usd: float = _float("PRE_LISTING_MAX_MCAP_USD", 1_000_000_000)
     pre_listing_min_volume_usd: float = _float("PRE_LISTING_MIN_VOLUME_USD", 250_000)
-    pre_listing_max_ai_candidates: int = _int("PRE_LISTING_MAX_AI_CANDIDATES", 3)
+    pre_listing_max_ai_candidates: int = _int("PRE_LISTING_MAX_AI_CANDIDATES", 5)
+    # Mix of alerts sent to the group: this % must be pre-Binance (last 30 days).
+    # Binance-mode alerts only go out while the share stays at or above it.
+    pre_listing_share_pct: float = _float("PRE_LISTING_SHARE_PCT", 90)
+    # Pre-Binance "👀 OBSERVAR" messages: daily cap and no-repeat window.
+    max_watch_per_day: int = _int("MAX_WATCH_PER_DAY", 3)
+    watch_cooldown_days: int = _int("WATCH_COOLDOWN_DAYS", 7)
 
 settings = Settings()

@@ -468,8 +468,20 @@ def _run_mode(mode: str, universe: list[Candidate], skip_symbol, watch: set[str]
     return stage3, [c for c in confirmed if c.dossier["vetoes"]], finalists
 
 
-def scan_candidates(skip_symbol: Callable[[str], bool] | None = None,
-                    watchlist: Iterable[str] = ()) -> tuple[dict[str, Any], list[Candidate], dict[str, Any]]:
+def binance_quota_open(pre_count: int, binance_count: int, share_pct: float) -> bool:
+    """
+    Can one more Binance-mode alert go out without the pre-Binance share of the group
+    falling below `share_pct`? With 90%: one Binance alert per nine pre-Binance alerts.
+    """
+    if share_pct <= 0:
+        return True
+    if share_pct >= 100:
+        return False
+    return (binance_count + 1) <= (1 - share_pct / 100) * (pre_count + binance_count + 1) + 1e-9
+
+
+def scan_candidates(skip_symbol: Callable[[str], bool] | None = None, watchlist: Iterable[str] = (),
+                    modes: Iterable[str] = ("binance", "pre_listing")) -> tuple[dict[str, Any], list[Candidate], dict[str, Any]]:
     """Runs the funnel up to (not including) the AI. Returns regime, finalists and funnel stats."""
     watch = {s.upper() for s in watchlist}
     coins = cg.markets(_universe_limit())
@@ -479,9 +491,12 @@ def scan_candidates(skip_symbol: Callable[[str], bool] | None = None,
     categories = _binance_categories()
     memes = _meme_ids()
 
+    modes = set(modes)
     by_mode: dict[str, list[Candidate]] = {"binance": [], "pre_listing": []}
     for rank, coin in enumerate(coins):
         mode = _mode_of(coin)
+        if mode not in modes:
+            continue  # e.g. Binance mode paused to keep the group mostly pre-Binance
         if mode == "binance" and rank >= settings.top_coins_to_scan:
             continue
         if mode and not prefilter(coin, mode):
@@ -502,14 +517,15 @@ def scan_candidates(skip_symbol: Callable[[str], bool] | None = None,
     return regime, finalists, stats
 
 
-def evaluate_candidates(skip_symbol: Callable[[str], bool] | None = None,
-                        watchlist: Iterable[str] = ()) -> dict[str, Any]:
+def evaluate_candidates(skip_symbol: Callable[[str], bool] | None = None, watchlist: Iterable[str] = (),
+                        modes: Iterable[str] = ("binance", "pre_listing")) -> dict[str, Any]:
     """
     One radar pass. The report tells apart "nothing passed" from "the AI failed":
-    {"regime", "universe", "deep", "candidates", "results", "watch", "vetoed", "rejected", "errors"}
+    {"regime", "universe", "deep", "candidates", "results", "watch", "watch_results",
+     "vetoed", "rejected", "errors"}
     """
-    regime, finalists, stats = scan_candidates(skip_symbol, watchlist)
-    results, watch, rejected, errors = [], [], [], []
+    regime, finalists, stats = scan_candidates(skip_symbol, watchlist, modes)
+    results, watch, watch_results, rejected, errors = [], [], [], [], []
 
     for c in finalists:
         add_profile(c)
@@ -524,12 +540,13 @@ def evaluate_candidates(skip_symbol: Callable[[str], bool] | None = None,
             results.append({"dossier": c.dossier, "ai": ai, **final})
         elif final["decision"] == "watch":
             watch.append(c.symbol)
+            watch_results.append({"dossier": c.dossier, "ai": ai, **final})
         elif final["problems"]:
             log.warning("%s descartado: %s | %s", c.symbol, "; ".join(final["problems"]), ai)
             rejected.append(f"{c.symbol}: {'; '.join(final['problems'])}")
 
     return {"regime": regime, **stats, "candidates": len(finalists), "results": results,
-            "watch": watch, "rejected": rejected, "errors": errors}
+            "watch": watch, "watch_results": watch_results, "rejected": rejected, "errors": errors}
 
 
 def analyze_symbol(query_symbol: str) -> dict[str, Any] | None:

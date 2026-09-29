@@ -34,6 +34,8 @@ O radar trabalha em **dois modos**, lado a lado:
 - **🟢 BINANCE** — ativos que já estão no spot da Binance (top 200).
 - **🚀 PRÉ-BINANCE** — ativos **com fundamento que ainda não estão no spot da Binance** (US$ 10M a US$ 1B, top 1000), pontuados pelos sinais que costumam anteceder uma listagem: Binance Alpha, portfólio YZi Labs (ex-Binance Labs), programas da Binance, perpétuo na Binance Futures sem spot e corretoras tier-1. Inclui tokens de DEX, sempre com checagem do contrato.
 
+**O grupo é majoritariamente Pré-Binance:** no mínimo `PRE_LISTING_SHARE_PCT` (90%) dos alertas dos últimos 30 dias são 🚀 — um alerta 🟢 BINANCE só sai a cada 9 pré-listagem (enquanto isso, o radar nem gasta IA com blue chips). Além dos alertas, até **3 "👀 OBSERVAR" pré-listagem por dia** (fora do placar). **Nada se repete:** ativo com sinal aberto não é alertado de novo, e o mesmo "OBSERVAR" não volta em 7 dias.
+
 > [!IMPORTANT]
 > Ninguém sabe o que a Binance vai listar — ela não publica isso. O modo Pré-Binance **não prevê listagens**: ele encontra ativos com fundamento fora da Binance e mostra os indícios. O placar registra, sem esconder, quantos sinais foram de fato listados depois.
 
@@ -230,7 +232,9 @@ Tudo mora no `.env` (modelo completo em [`.env.example`](.env.example)). Os ajus
 | `ENABLE_PRE_LISTING` | `true` | Liga o modo Pré-Binance |
 | `PRE_LISTING_MIN_MCAP_USD` / `MAX` | `10000000` / `1000000000` | Faixa de market cap do Pré-Binance |
 | `PRE_LISTING_MIN_VOLUME_USD` | `250000` | Volume mínimo no Pré-Binance |
-| `PRE_LISTING_TOP_N` / `PRE_LISTING_MAX_AI_CANDIDATES` | `1000` / `3` | Tamanho do universo e teto de IA do Pré-Binance |
+| `PRE_LISTING_TOP_N` / `PRE_LISTING_MAX_AI_CANDIDATES` | `1000` / `5` | Tamanho do universo e teto de IA do Pré-Binance |
+| `PRE_LISTING_SHARE_PCT` | `90` | % mínimo de alertas Pré-Binance no grupo (30 dias) |
+| `MAX_WATCH_PER_DAY` / `WATCH_COOLDOWN_DAYS` | `3` / `7` | "👀 OBSERVAR" pré-listagem por dia e janela sem repetir o ativo |
 | `CAPITAL_BRL` / `MAX_POSITION_PCT` | `20000` / `3` | Teto por posição exibido no alerta |
 
 Pesos das camadas, thresholds de tendência, derivativos, social e TTLs de cache ficam centralizados em [`analysis/params.py`](analysis/params.py).
@@ -239,7 +243,7 @@ Pesos das camadas, thresholds de tendência, derivativos, social e TTLs de cache
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                 # 177 testes; qualquer acesso à internet reprova o teste
+pytest                 # 189 testes; qualquer acesso à internet reprova o teste
 ruff check .           # erros reais: imports, nomes indefinidos, sintaxe
 python smoke_test.py   # checagem contra as APIs reais (--ai inclui uma análise paga)
 ```

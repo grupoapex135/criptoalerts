@@ -506,7 +506,10 @@ async def _notify_error(context: ContextTypes.DEFAULT_TYPE, text: str):
 async def send_opportunity(context: ContextTypes.DEFAULT_TYPE, result: dict):
     d, a = result["dossier"], result["ai"]
     symbol = d["asset"]["symbol"]
+    # Never the same asset twice: not while its signal is open, nor inside the cooldown.
     if await asyncio.to_thread(db.recent_alert_exists, symbol):
+        return
+    if symbol in await asyncio.to_thread(db.open_signal_symbols):
         return
     chat_id = settings.telegram_chat_id
     if not chat_id:
@@ -543,10 +546,25 @@ async def send_opportunity(context: ContextTypes.DEFAULT_TYPE, result: dict):
     opp_id = await asyncio.to_thread(db.save_opportunity, row)
     await asyncio.to_thread(db.save_alert, opp_id, symbol, chat_id, msg)
 
+def _modes_for_this_scan() -> tuple[list[str], dict[str, int]]:
+    """Pre-Binance always; Binance only while the group keeps >= PRE_LISTING_SHARE_PCT pre-Binance."""
+    counts = db.mode_counts(30)
+    if not settings.enable_pre_listing:
+        return ["binance"], counts
+    modes = ["pre_listing"]
+    if radar.binance_quota_open(counts.get("pre_listing", 0), counts.get("binance", 0), settings.pre_listing_share_pct):
+        modes.insert(0, "binance")
+    return modes, counts
+
 async def _run_scan() -> dict:
     watchlist = await asyncio.to_thread(db.watchlist)
-    in_cooldown = await asyncio.to_thread(db.recent_alert_symbols)
-    return await asyncio.to_thread(evaluate_candidates, in_cooldown.__contains__, watchlist)
+    # Skip before any per-coin call: cooldown AND every symbol with an open signal.
+    skip = await asyncio.to_thread(lambda: db.recent_alert_symbols() | db.open_signal_symbols())
+    modes, counts = await asyncio.to_thread(_modes_for_this_scan)
+    report = await asyncio.to_thread(evaluate_candidates, skip.__contains__, watchlist, tuple(modes))
+    report["binance_paused"] = "binance" not in modes and settings.enable_pre_listing
+    report["mix_30d"] = counts
+    return report
 
 async def _deliver(context: ContextTypes.DEFAULT_TYPE, report: dict):
     for result in report["results"]:
@@ -554,6 +572,30 @@ async def _deliver(context: ContextTypes.DEFAULT_TYPE, report: dict):
             await send_opportunity(context, result)
         except Exception:
             log.exception("[scanner] falha ao enviar %s", result["dossier"]["asset"]["symbol"])
+    await _deliver_watch(context, report)
+
+async def _deliver_watch(context: ContextTypes.DEFAULT_TYPE, report: dict):
+    """Pre-Binance "👀 OBSERVAR": capped per day, never the same asset inside the cooldown window."""
+    if settings.max_watch_per_day <= 0 or not settings.telegram_chat_id:
+        return
+    budget = settings.max_watch_per_day - await asyncio.to_thread(db.watch_sent_count, 24)
+    if budget <= 0:
+        return
+    recent = await asyncio.to_thread(db.recent_watch_symbols, settings.watch_cooldown_days)
+    picks = sorted((r for r in report.get("watch_results") or []
+                    if r["dossier"].get("mode") == "pre_listing" and r["dossier"]["asset"]["symbol"] not in recent),
+                   key=lambda r: -(r.get("confidence") or 0))[:budget]
+    for r in picks:
+        symbol = r["dossier"]["asset"]["symbol"]
+        msg = compact_message(r)
+        try:
+            await send_text(context.bot, msg)
+        except Exception:
+            log.exception("[observar] falha ao enviar %s", symbol)
+            continue
+        STATE["last_results"][symbol] = r
+        await asyncio.to_thread(db.save_watch, symbol, settings.telegram_chat_id, msg)
+        log.info("[observar] enviado: %s", symbol)
 
 async def scanner_job(context: ContextTypes.DEFAULT_TYPE):
     lock = _get_scan_lock()
@@ -605,6 +647,8 @@ def scan_summary(report: dict) -> str:
     ]
     if report["watch"]:
         lines.append(f"👀 Em observação: {', '.join(report['watch'])}")
+    if report.get("binance_paused"):
+        lines.append(f"⏸️ Blue chips (Binance) pausados: meta de {settings.pre_listing_share_pct:.0f}% pré-listagem")
     if report["vetoed"]:
         lines.append(f"🚫 Bloqueados: {len(report['vetoed'])}")
     if report["rejected"]:
@@ -727,6 +771,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     jobs = context.job_queue.get_jobs_by_name("market_scanner") if context.job_queue else []
     lines.append(f"Próxima: {local_time(jobs[0].next_t)}" if jobs else "Varredura automática: desligada")
     lines.append(f"Fontes: {_sources_line()}")
+    mix = await asyncio.to_thread(db.mode_counts, 30)
+    total = sum(mix.values())
+    if total:
+        share = mix.get("pre_listing", 0) / total * 100
+        lines.append(f"Mix 30d: {mix.get('pre_listing', 0)} pré-Binance · {mix.get('binance', 0)} Binance "
+                     f"({share:.0f}% pré · meta {settings.pre_listing_share_pct:.0f}%)")
     if db.enabled:
         lines.append("Supabase: ligado" + (f" (último erro: {db.last_error[:150]})" if db.last_error else ""))
     else:

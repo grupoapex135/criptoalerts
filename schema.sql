@@ -71,6 +71,11 @@ alter table opportunities add column if not exists coin_id text;
 -- When a pre-Binance signal's asset showed up on Binance spot.
 alter table opportunities add column if not exists binance_listed_at timestamptz;
 
+-- ------------------------------------------------------------------ v4: alert kinds
+-- alert = tracked signal; watch = pre-Binance "👀 OBSERVAR" message (not in the scoreboard).
+alter table alerts add column if not exists kind text not null default 'alert';
+create index if not exists alerts_kind_sent_idx on alerts(kind, sent_at desc);
+
 create table if not exists watchlist (
     symbol text primary key,
     created_at timestamptz not null default now(),

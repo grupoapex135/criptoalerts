@@ -39,6 +39,16 @@ Detalhes: /detalhe FLUID                   ← relatório completo, sem nova cha
 
 O **`/detalhe`** traz a nota completa em seções — tese e utilidade, sinais de listagem e contrato, valuation (topo histórico, par BTC, FDV, diluição, receita, TVL), técnico (tendência, MA50×MA200, RSI, alavancagem), contexto macro (regime, Fear & Greed), por que agora e o plano — mais nota, cobertura de dados e principal risco.
 
+**O que chega ao grupo, e quanto:**
+
+| Mensagem | Regra |
+|---|---|
+| 🟢 OPORTUNIDADE · 🚀 PRÉ-BINANCE | sempre que passar em tudo |
+| 🟢 OPORTUNIDADE · 🟢 BINANCE | só enquanto o grupo mantiver ≥ `PRE_LISTING_SHARE_PCT` (90%) de alertas pré-listagem nos últimos 30 dias — 1 Binance a cada 9 pré. Com a cota fechada, o radar nem analisa blue chips |
+| 👀 OBSERVAR · 🚀 PRÉ-BINANCE | até `MAX_WATCH_PER_DAY` (3) por dia, melhores primeiro; fora do placar |
+
+**Nunca repete:** ativo com sinal aberto não recebe outro alerta até o sinal fechar; o mesmo "OBSERVAR" não volta antes de `WATCH_COOLDOWN_DAYS` (7). Tudo fica no Supabase, então vale mesmo depois de reiniciar o bot. O `/status` mostra o mix dos últimos 30 dias.
+
 ## 2. O /analyze
 
 Um pouco mais de contexto, ainda curto. Quatro respostas possíveis:
